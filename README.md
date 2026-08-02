@@ -112,6 +112,8 @@ enterprise-rag/
 | OpenAI embeddings (batch 50, 4 retries) | Done |
 | Processor + Qdrant upsert (CLI) | Done |
 | Qdrant search + Jina rerank | Done |
+| AgentState + planner contract | Done |
+| LangGraph compile (retriever/responder) | Next |
 | FlashRank reranker | Skipped (using Jina API instead) |
 | Embeddings + retrieval + rerank | Embeddings + Qdrant upsert done; rerank next |
 | LangGraph query path | Scaffolded |
