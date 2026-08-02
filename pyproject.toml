@@ -2,6 +2,7 @@
 name = "enterprise-rag-backend"
 version = "0.1.0"
 description = "Enterprise RAG FastAPI backend (OpenAI embeddings, OpenAI/Groq inference, Qdrant)"
+readme = "README.md"
 authors = [
     { name = "Mirza Shahbaz Ali Baig", email = "mirzashahbazbaig724@gmail.com" }
 ]
