@@ -1,35 +1,37 @@
-"""Planner node — route to conversational reply OR technical search rewrite.
+"""Planner node — history-aware route: conversational reply XOR search rewrite.
 
-Contract
---------
-The planner must output **exactly one** of:
+Uses chat history so follow-ups resolve correctly, e.g.:
 
-1. ``intent="conversational"`` + ``conversational_reply``
-   Small-talk / meta / out-of-scope chat. No retrieval. The reply is the
-   answer (graph can skip retriever and go straight to done/responder).
+    User: "What is a DaemonSet?"
+    Assistant: [explains…]
+    User: "how do I monitor it?"
+    → rewritten_query ≈ "how to monitor Kubernetes DaemonSet"
 
-2. ``intent="technical"`` + ``rewritten_query``
-   Knowledge question. Do **not** answer here — only rewrite the user
-   question into a focused search query for Qdrant + Jina.
-
-Nothing else (no mixed fields, no free-form prose as the sole output).
+Contract (XOR) is enforced by ``PlannerDecision`` / ``PlanState``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import json
+import re
+from typing import Any, Literal, Sequence
 
 import logfire
-from pydantic import BaseModel, Field, model_validator
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from app.agents.llm import get_chat_model
 from app.agents.state import AgentIntent, AgentState, PlanState
+from app.config import settings
 from app.ingestion.loaders.base import ensure_logfire
 
 PlannerIntent = Literal["conversational", "technical"]
 
+_MAX_HISTORY_MESSAGES = 12  # recent turns only — keeps latency/cost down
+
 
 class PlannerDecision(BaseModel):
-    """Strict planner output schema (LLM / rule engine must match this)."""
+    """Strict planner output schema (LLM must match this)."""
 
     intent: PlannerIntent = Field(
         description="conversational = reply only; technical = search rewrite only"
@@ -40,11 +42,11 @@ class PlannerDecision(BaseModel):
     )
     rewritten_query: str | None = Field(
         default=None,
-        description="Required when intent=technical. Search query for retrieval.",
+        description="Required when intent=technical. Standalone search query.",
     )
     rationale: str | None = Field(
         default=None,
-        description="Optional short reason for logging / debugging (not shown to user).",
+        description="Optional short reason for logging (not shown to user).",
     )
 
     @model_validator(mode="after")
@@ -57,8 +59,6 @@ class PlannerDecision(BaseModel):
         has_reply = reply is not None
         has_query = query is not None
 
-        # Do NOT silently drop a field — that hides mixed LLM output
-        # ("thanks, and also what's a DaemonSet?") behind a greeter reply.
         if has_reply == has_query:
             raise ValueError(
                 "PlannerDecision XOR violated: set exactly one of "
@@ -76,7 +76,6 @@ class PlannerDecision(BaseModel):
         return self
 
     def to_plan_state(self) -> PlanState:
-        # PlanState re-checks XOR — double gate at the graph boundary.
         return PlanState(
             intent=self.intent,
             conversational_reply=self.conversational_reply,
@@ -87,35 +86,46 @@ class PlannerDecision(BaseModel):
 
 PLANNER_SYSTEM_PROMPT = """You are the planner for an enterprise RAG assistant.
 
-Classify the user message and output JSON that matches this contract EXACTLY:
+You see the FULL conversation so far. Use it — especially for short follow-ups
+that rely on pronouns or omitted subjects ("it", "that", "the same thing",
+"how do I monitor it?", "and the probes?").
 
-A) Conversational path — greetings, thanks, chit-chat, capability questions that
-   do not need document retrieval, or clearly off-topic small talk:
+Classify the LATEST user message and output JSON that matches this contract EXACTLY:
+
+A) Conversational — greetings, thanks-only, chit-chat, capability questions that
+   need no document retrieval:
    {
      "intent": "conversational",
-     "conversational_reply": "<your direct reply to the user>",
+     "conversational_reply": "<direct reply>",
      "rewritten_query": null,
      "rationale": "<optional>"
    }
 
-B) Technical path — questions about company/docs/systems/Kubernetes/etc. that
-   should be answered from the knowledge base:
+B) Technical — anything that should hit the knowledge base (including follow-ups
+   that only make sense with prior turns):
    {
      "intent": "technical",
      "conversational_reply": null,
-     "rewritten_query": "<concise search query rewritten for retrieval>",
+     "rewritten_query": "<standalone search query>",
      "rationale": "<optional>"
    }
 
-Rules:
+History rules (critical for UX):
+- If the user asks a follow-up like "how do I monitor it?" after discussing
+  DaemonSets, rewritten_query MUST name the subject explicitly, e.g.
+  "how to monitor Kubernetes DaemonSet" — never leave "it" unresolved.
+- Rewrite into a self-contained, keyword-rich query a search engine could run
+  with NO chat history.
+- Prefer the most recent concrete topic in the thread when pronouns are ambiguous.
+
+XOR rules:
 - Output ONLY one path. Never both a reply and a search query.
-- On the technical path: do NOT answer the question. Only rewrite for search.
-- On the conversational path: do NOT invent a search query.
-- rewritten_query should be specific, keyword-rich, and free of filler.
-- If the user mixes chit-chat AND a real question (e.g. "thanks, also what is a
-  DaemonSet?"), choose the technical path only — put the knowledge question into
-  rewritten_query and leave conversational_reply null. Do not answer with just
-  "You're welcome!"
+- Technical path: do NOT answer the question — only rewrite for search.
+- Conversational path: do NOT invent a search query.
+- Mixed chit-chat + real question ("thanks, also what is a DaemonSet?") →
+  technical path only (put the knowledge ask in rewritten_query).
+
+Output raw JSON only — no markdown fences.
 """
 
 
@@ -132,19 +142,18 @@ def apply_planner_decision(state: AgentState, decision: PlannerDecision) -> dict
     intent: AgentIntent = decision.intent
 
     updates: dict[str, Any] = {
-        "plan": plan,
+        "plan": plan.model_dump(),
         "intent": intent,
         "status": "planning",
         "error": None,
     }
 
     if decision.intent == "conversational":
-        # Conversational path can short-circuit with the planner reply.
         updates["final_answer"] = decision.conversational_reply or ""
         updates["documents"] = []
         updates["status"] = "done"
+        updates["messages"] = [AIMessage(content=updates["final_answer"])]
     else:
-        # Technical path: hand a rewritten query to the retriever.
         updates["current_query"] = decision.rewritten_query or state.get(
             "current_query", ""
         )
@@ -154,32 +163,178 @@ def apply_planner_decision(state: AgentState, decision: PlannerDecision) -> dict
     return updates
 
 
-def planner_node(state: AgentState) -> dict[str, Any]:
-    """Planner graph node.
+def _message_text(message: Any) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        return "\n".join(p for p in parts if p).strip()
+    return str(content or "").strip()
 
-    LLM wiring comes next. For now this is a deterministic stub that:
-    - treats empty / pure greetings as conversational
-    - mixed chit-chat + real question → technical (search rewrite)
-    - otherwise emits a technical rewritten_query (= current_query stripped)
 
-    Replace the stub body with an LLM call that returns PlannerDecision JSON.
-    """
-    ensure_logfire()
+def _is_human(message: Any) -> bool:
+    role = getattr(message, "type", None) or getattr(message, "role", None)
+    return role in {"human", "user"} or isinstance(message, HumanMessage)
+
+
+def _is_ai(message: Any) -> bool:
+    role = getattr(message, "type", None) or getattr(message, "role", None)
+    return role in {"ai", "assistant"} or isinstance(message, AIMessage)
+
+
+def build_dialogue(state: AgentState) -> list[BaseMessage]:
+    """Prior turns + latest user query (history-aware input for the LLM)."""
+    history: list[BaseMessage] = []
+    for msg in state.get("messages") or []:
+        if isinstance(msg, BaseMessage):
+            history.append(msg)
+        elif isinstance(msg, dict):
+            role = msg.get("role") or msg.get("type")
+            text = str(msg.get("content") or "").strip()
+            if not text:
+                continue
+            if role in {"human", "user"}:
+                history.append(HumanMessage(content=text))
+            elif role in {"ai", "assistant"}:
+                history.append(AIMessage(content=text))
+
+    # Keep a short window of recent turns.
+    if len(history) > _MAX_HISTORY_MESSAGES:
+        history = history[-_MAX_HISTORY_MESSAGES:]
+
     query = (state.get("current_query") or "").strip()
+    if query:
+        if not history or not _is_human(history[-1]) or _message_text(history[-1]) != query:
+            history = [*history, HumanMessage(content=query)]
+    return history
 
-    with logfire.span("agent.planner", query=query[:200]):
+
+def _format_history_block(dialogue: Sequence[BaseMessage]) -> str:
+    """Readable transcript for the planner (explicit roles)."""
+    lines: list[str] = []
+    for msg in dialogue:
+        text = _message_text(msg)
+        if not text:
+            continue
+        if _is_human(msg):
+            lines.append(f"User: {text}")
+        elif _is_ai(msg):
+            lines.append(f"Assistant: {text}")
+        else:
+            lines.append(f"Other: {text}")
+    return "\n".join(lines) if lines else "(no prior turns)"
+
+
+def _extract_json_object(raw: str) -> dict[str, Any]:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if not match:
+        raise ValueError(f"Planner returned non-JSON output: {raw[:300]!r}")
+    data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise ValueError("Planner JSON root must be an object")
+    return data
+
+
+def _build_chat_model() -> Any:
+    """Prefer Groq for planning; fall back to OpenAI chat."""
+    return get_chat_model(temperature=0.1)
+
+
+def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlannerDecision:
+    """Call the chat model with history + enforce XOR via PlannerDecision."""
+    llm = _build_chat_model()
+    transcript = _format_history_block(dialogue)
+    latest = _message_text(dialogue[-1]) if dialogue else ""
+
+    user_payload = (
+        f"Conversation so far:\n{transcript}\n\n"
+        f"Latest user message:\n{latest}\n\n"
+        "Decide the path for the latest user message. "
+        "If it is a follow-up, resolve pronouns using earlier turns."
+    )
+
+    # Prefer native structured output when the provider supports it.
+    try:
+        structured = llm.with_structured_output(PlannerDecision)
+        result = structured.invoke(
+            [
+                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                HumanMessage(content=user_payload),
+            ]
+        )
+        if isinstance(result, PlannerDecision):
+            return result
+        if isinstance(result, dict):
+            return parse_planner_decision(result)
+    except Exception as exc:  # noqa: BLE001 — fall through to JSON parse path
+        logfire.warn("structured_output unavailable; using JSON prompt", error=str(exc))
+
+    raw = llm.invoke(
+        [
+            SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+            HumanMessage(content=user_payload),
+        ]
+    )
+    content = _message_text(raw)
+    return parse_planner_decision(_extract_json_object(content))
+
+
+def planner_node(state: AgentState) -> dict[str, Any]:
+    """History-aware planner graph node."""
+    ensure_logfire()
+    dialogue = build_dialogue(state)
+    query = (state.get("current_query") or "").strip()
+    if not query and dialogue:
+        query = _message_text(dialogue[-1])
+
+    with logfire.span(
+        "agent.planner",
+        query=query[:200],
+        history_turns=len(dialogue),
+    ):
         try:
-            decision = _stub_plan(query)
+            if not query:
+                decision = PlannerDecision(
+                    intent="conversational",
+                    conversational_reply=(
+                        "Hi — ask me a technical question about your enterprise "
+                        "docs and I'll search the knowledge base."
+                    ),
+                    rationale="empty query",
+                )
+            elif settings.has_groq or settings.has_openai:
+                decision = _llm_plan(dialogue)
+            else:
+                logfire.warn("No LLM keys — using rule stub planner")
+                decision = _stub_plan(query, dialogue)
+
             updates = apply_planner_decision(state, decision)
             logfire.info(
                 "Planner decision",
                 intent=decision.intent,
                 rewritten_query=decision.rewritten_query,
                 has_reply=bool(decision.conversational_reply),
+                history_turns=len(dialogue),
             )
             return updates
-        except Exception as exc:  # noqa: BLE001 — surface contract failures on state
-            logfire.error("Planner XOR/contract failure", error=str(exc))
+        except (ValidationError, ValueError, RuntimeError) as exc:
+            logfire.error("Planner failure", error=str(exc))
             return {
                 "status": "error",
                 "error": str(exc),
@@ -217,13 +372,13 @@ _TECH_HINTS = (
     "kubernetes",
     "probe",
     "deploy",
+    "monitor",
     "also",
     "?",
 )
 
 
 def _is_pure_greeting(lowered: str) -> bool:
-    """True only for bare greetings — not 'thanks, and also what's a DaemonSet?'."""
     for g in _GREETING_PREFIXES:
         if lowered == g or lowered in {f"{g}!", f"{g}?", f"{g}."}:
             return True
@@ -231,15 +386,14 @@ def _is_pure_greeting(lowered: str) -> bool:
             rest = lowered[len(g) :].lstrip(" ,!.?")
             if not rest:
                 return True
-            # Anything that looks like a real ask → not a pure greeting.
             if len(rest) >= 12 or any(h in rest for h in _TECH_HINTS):
                 return False
             return len(rest) < 10
     return False
 
 
-def _stub_plan(query: str) -> PlannerDecision:
-    """Temporary rule-based planner until the LLM node is wired."""
+def _stub_plan(query: str, dialogue: Sequence[BaseMessage] = ()) -> PlannerDecision:
+    """Offline fallback when no LLM keys are configured."""
     lowered = query.lower().strip()
     if not lowered:
         return PlannerDecision(
@@ -261,8 +415,25 @@ def _stub_plan(query: str) -> PlannerDecision:
             rationale="greeting / meta",
         )
 
+    # Cheap history hint for follow-ups when LLM is unavailable.
+    prior_topics: list[str] = []
+    for msg in dialogue:
+        text = _message_text(msg)
+        if _is_human(msg) and text and text.lower() != lowered:
+            prior_topics.append(text)
+
+    if prior_topics and any(
+        token in lowered for token in ("it", "that", "this", "them", "those")
+    ):
+        rewritten = f"{query} (context: {prior_topics[-1]})"
+        return PlannerDecision(
+            intent="technical",
+            rewritten_query=rewritten,
+            rationale="stub: pronoun follow-up with prior user turn",
+        )
+
     return PlannerDecision(
         intent="technical",
         rewritten_query=query,
-        rationale="stub: pass-through until LLM rewriter is connected",
+        rationale="stub: pass-through",
     )

@@ -1,8 +1,18 @@
 """LangGraph agent state for enterprise RAG orchestration.
 
-`messages` uses LangGraph's `add_messages` reducer so each node can append
-without wiping prior turns. All other fields are last-write-wins (replaced
-when a node returns them).
+Persistence note
+----------------
+Long-term chat memory lives in Neon (``chat_messages`` by ``session_id``),
+not in this TypedDict and not in a LangGraph checkpointer.
+
+``AgentState`` is **ephemeral per request**:
+- ``invoke_agent`` loads prior Neon messages → fills ``messages``
+- the graph runs (planner / retriever / responder)
+- only the new user + assistant texts are written back to Neon
+- ``documents``, ``plan``, scores, etc. are throwaway turn data
+
+``session_id`` is owned by the API / ``invoke_agent`` layer — it does not
+need to live on AgentState for the current design.
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ AgentIntent = Literal["conversational", "technical", "unknown"]
 
 
 class RetrievedDocument(BaseModel):
-    """Normalized retrieval hit carried through the graph."""
+    """Normalized retrieval hit carried through one graph turn."""
 
     text: str
     score: float | None = None
@@ -41,7 +51,7 @@ class RetrievedDocument(BaseModel):
 
 
 class PlanState(BaseModel):
-    """Planner decision on the graph — XOR contract is enforced in code.
+    """Planner decision for this turn — XOR contract enforced in code.
 
     Exactly one of ``conversational_reply`` / ``rewritten_query`` must be set
     (non-empty). Never both, never neither. ``intent`` is aligned to whichever
@@ -63,7 +73,6 @@ class PlanState(BaseModel):
         has_reply = reply is not None
         has_query = query is not None
 
-        # both True or both False → illegal
         if has_reply == has_query:
             raise ValueError(
                 "PlanState XOR violated: set exactly one of "
@@ -71,7 +80,6 @@ class PlanState(BaseModel):
                 f"(got reply={has_reply}, query={has_query})"
             )
 
-        # Intent must match the filled branch (prevents conversational + leftover query).
         expected: AgentIntent = "conversational" if has_reply else "technical"
         if self.intent not in (expected, "unknown"):
             raise ValueError(
@@ -83,35 +91,29 @@ class PlanState(BaseModel):
 
 
 class AgentState(TypedDict):
-    """Shared state across planner → retriever → responder."""
+    """In-memory working state for a single graph invocation."""
 
-    # Chat history — reducer appends / merges message ids.
+    # Hydrated from Neon + this turn's HumanMessage; add_messages merges
+    # mid-graph AIMessage appends (planner/responder) within the same turn.
     messages: Annotated[list, add_messages]
 
-    # Latest user question (raw).
+    # Latest user question / rewritten search query for this turn.
     current_query: str
 
-    # Retrieved / reranked docs for the technical path.
-    documents: list[RetrievedDocument]
+    # Retrieved docs for this turn only (not persisted).
+    documents: list[dict[str, Any]]
 
-    # Planner output (conversational reply XOR rewritten query).
-    plan: PlanState | None
+    # Planner output for this turn only (not persisted).
+    plan: dict[str, Any] | None
 
-    # Pipeline lifecycle flag.
     status: AgentStatus
-
-    # Shortcut of plan.intent for routing / UI.
     intent: AgentIntent
-
-    # Final user-facing answer (conversational reply or grounded response).
     final_answer: str
-
-    # Optional error detail when status == "error".
     error: NotRequired[str | None]
 
 
 def initial_agent_state(query: str = "") -> AgentState:
-    """Fresh state for a new graph invocation."""
+    """Empty in-memory state (tests / manual node calls)."""
     return {
         "messages": [],
         "current_query": query,

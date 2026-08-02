@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     langfuse_public_key: str = ""
     langfuse_base_url: str = "https://cloud.langfuse.com"
 
+    # --- Neon / Postgres (chat session memory) ---
+    database_url: str = ""
+
     # --- Paths ---
     data_dir: Path = ROOT_DIR / "DATA"
     true_data_dir: Path = ROOT_DIR / "DATA" / "true_data"
@@ -102,6 +105,10 @@ class Settings(BaseSettings):
     @property
     def has_langfuse(self) -> bool:
         return bool(self.langfuse_public_key and self.langfuse_secret_key)
+
+    @property
+    def has_database(self) -> bool:
+        return bool(self.database_url)
 
 
 @lru_cache
