@@ -29,7 +29,8 @@ def get_qdrant_client() -> QdrantClient:
 
 def point_id_for(source: str, chunk_index: int) -> str:
     """Stable UUID so re-ingesting the same file overwrites the same points."""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}::{chunk_index}"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}::{chunk_index}")) 
+    # that's a smart move to avoid collisions author : Mirza Shahbaz Ali Baig
 
 
 def ensure_collection(
