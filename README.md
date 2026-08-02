@@ -38,6 +38,7 @@ Chunking is paragraph-aware: empty blocks are dropped, paragraphs are packed int
 ### 2. Embeddings ≠ inference
 - **OpenAI** `text-embedding-3-small` for vectors (stable, 1536-dim)
 - Batched at **50** texts/request with **4** exponential retries (1s → 8s); local sentence-transformers fallback only if OpenAI still fails
+- **Jina reranker** (`jina-reranker-v2-base-multilingual`) re-orders Qdrant candidates before they hit the LLM
 - **Groq** for fast chat / agent responses (with a fallback Groq key in config)
 - Same OpenAI chat model available when I want the "main" path on OpenAI instead
 
@@ -83,7 +84,7 @@ enterprise-rag/
 │   │   ├── loaders/          # text, html, pdf, office  ✅ implemented
 │   │   ├── chunking/         # paragraph-aware splitter (~1–1.5k + overlap) ✅
 │   │   └── processor.py      # CLI + load→chunk→embed→upsert ✅
-│   ├── services/retrieval/   # embeddings ✅, Qdrant upsert ✅, FlashRank
+│   ├── services/retrieval/   # embeddings ✅, Qdrant search+upsert ✅, Jina rerank ✅
 │   ├── guardrails/           # NeMo rails
 │   └── gateway/              # Portkey client
 ├── evals/                    # RAGAS + golden set + guardrail checks
@@ -110,7 +111,8 @@ enterprise-rag/
 | Paragraph-aware chunking (+ overlap) | Done |
 | OpenAI embeddings (batch 50, 4 retries) | Done |
 | Processor + Qdrant upsert (CLI) | Done |
-| FlashRank reranker | Next |
+| Qdrant search + Jina rerank | Done |
+| FlashRank reranker | Skipped (using Jina API instead) |
 | Embeddings + retrieval + rerank | Embeddings + Qdrant upsert done; rerank next |
 | LangGraph query path | Scaffolded |
 | Guardrails + Portkey | Scaffolded |
@@ -206,7 +208,7 @@ Settings live in `app/config.py` and read the root `.env`. Important knobs:
 - `OPENAI_*` / `EMBEDDING_DIMENSIONS`
 - `GROQ_*` / `GROQ_FALLBACK_API_KEY` / `JUDGE_GROQ_API_KEY`
 - `QDRANT_CLUSTER_ENDPOINT` or `QDRANT_URL` + `QDRANT_API_KEY` + `QDRANT_COLLECTION`
-- `PORTKEY_*`, `LANGFUSE_*`, `LOGFIRE_TOKEN` (optional if `.logfire/` credentials exist)
+- `PORTKEY_*`, `JINA_API_KEY` / `JINA_RERANK_MODEL`, `LANGFUSE_*`, `LOGFIRE_TOKEN` (optional if `.logfire/` credentials exist)
 
 Never commit `.env` or `.logfire/`.
 

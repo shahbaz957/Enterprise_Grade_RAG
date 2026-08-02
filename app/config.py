@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     portkey_api_key: str = ""
     portkey_virtual_key: str = ""
 
+    # --- Jina (reranker) ---
+    jina_api_key: str = ""
+    jina_rerank_model: str = "jina-reranker-v2-base-multilingual"
+    jina_rerank_top_n: int = 15
+
     # --- Qdrant ---
     qdrant_url: str = "http://localhost:6333"
     qdrant_cluster_endpoint: str = ""
@@ -89,6 +94,10 @@ class Settings(BaseSettings):
     @property
     def has_portkey(self) -> bool:
         return bool(self.portkey_api_key)
+
+    @property
+    def has_jina(self) -> bool:
+        return bool(self.jina_api_key)
 
     @property
     def has_langfuse(self) -> bool:
