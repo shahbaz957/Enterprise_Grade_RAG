@@ -20,7 +20,7 @@ def get_qdrant_client() -> QdrantClient:
     """Lazy singleton Qdrant client (cloud or local)."""
     global _client
     if _client is None:
-        kwargs: dict[str, Any] = {"url": settings.qdrant_endpoint}
+        kwargs: dict[str, Any] = {"url": settings.qdrant_endpoint,  "timeout": 60}
         if settings.qdrant_api_key:
             kwargs["api_key"] = settings.qdrant_api_key
         _client = QdrantClient(**kwargs)
