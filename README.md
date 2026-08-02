@@ -33,8 +33,11 @@ Loaders are extension-routed (`load_document(path)`):
 
 Everything normalizes into a shared `LoadedDocument` (text + metadata). Logfire spans wrap each load so I can see failures and empty extracts in the dashboard.
 
+Chunking is paragraph-aware: empty blocks are dropped, paragraphs are packed into ~1000–1500 character windows, and a small overlap is kept between chunks so answers that sit on a boundary don't disappear from both sides.
+
 ### 2. Embeddings ≠ inference
 - **OpenAI** `text-embedding-3-small` for vectors (stable, 1536-dim)
+- Batched at **50** texts/request with **4** exponential retries (1s → 8s); local sentence-transformers fallback only if OpenAI still fails
 - **Groq** for fast chat / agent responses (with a fallback Groq key in config)
 - Same OpenAI chat model available when I want the "main" path on OpenAI instead
 
@@ -78,9 +81,9 @@ enterprise-rag/
 │   ├── agents/               # LangGraph state, graph, nodes
 │   ├── ingestion/
 │   │   ├── loaders/          # text, html, pdf, office  ✅ implemented
-│   │   ├── chunking/         # splitter (next)
-│   │   └── processor.py      # CLI + router + upsert (next)
-│   ├── services/retrieval/   # embeddings, Qdrant, FlashRank
+│   │   ├── chunking/         # paragraph-aware splitter (~1–1.5k + overlap) ✅
+│   │   └── processor.py      # CLI + load→chunk→embed→upsert ✅
+│   ├── services/retrieval/   # embeddings ✅, Qdrant upsert ✅, FlashRank
 │   ├── guardrails/           # NeMo rails
 │   └── gateway/              # Portkey client
 ├── evals/                    # RAGAS + golden set + guardrail checks
@@ -104,8 +107,11 @@ enterprise-rag/
 |------|--------|
 | Project layout + config | Done |
 | Document loaders + Logfire spans | Done |
-| Chunking / Qdrant upsert | In progress / next |
-| Embeddings + retrieval + rerank | Scaffolded |
+| Paragraph-aware chunking (+ overlap) | Done |
+| OpenAI embeddings (batch 50, 4 retries) | Done |
+| Processor + Qdrant upsert (CLI) | Done |
+| FlashRank reranker | Next |
+| Embeddings + retrieval + rerank | Embeddings + Qdrant upsert done; rerank next |
 | LangGraph query path | Scaffolded |
 | Guardrails + Portkey | Scaffolded |
 | RAGAS evals | Scaffolded |
@@ -174,6 +180,21 @@ from app.ingestion.loaders import load_document
 
 doc = load_document("DATA/true_data/cronjobs.docx")
 print(doc.doc_type, doc.char_count, doc.metadata)
+```
+
+### 5. Ingest into Qdrant
+```bash
+# single file
+uv run python -m app.ingestion.processor --file DATA/true_data/parallel_work_queue.txt --corpus true
+
+# whole folder
+uv run python -m app.ingestion.processor --dir DATA/true_data --corpus true
+
+# both true_data + noisy_data
+uv run python -m app.ingestion.processor --universal
+
+# dry run (no Qdrant write)
+uv run python -m app.ingestion.processor --file DATA/true_data/cronjobs.docx --no-upsert
 ```
 
 ---
