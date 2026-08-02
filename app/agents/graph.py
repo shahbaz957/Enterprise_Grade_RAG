@@ -23,6 +23,11 @@ from app.db.session_store import (
     load_messages,
 )
 from app.ingestion.loaders.base import ensure_logfire
+from app.observability.langfuse_tracing import (
+    build_langfuse_config,
+    configure_langfuse,
+    flush_langfuse,
+)
 
 RouteAfterPlanner = Literal["retriever", "responder", "__end__"]
 
@@ -62,6 +67,7 @@ def build_graph():
 @lru_cache(maxsize=1)
 def get_compiled_graph():
     ensure_logfire()
+    configure_langfuse()
     return build_graph()
 
 
@@ -91,6 +97,7 @@ def invoke_agent(
     older clients.
     """
     ensure_logfire()
+    configure_langfuse()
     q = (question or "").strip()
     if not q:
         raise ValueError("question must be non-empty")
@@ -111,14 +118,18 @@ def invoke_agent(
     }
 
     graph = get_compiled_graph()
+    lf_config = build_langfuse_config(session_id=sid)
+
     with logfire.span("agent.invoke", session_id=sid, question=q[:200]):
-        result = graph.invoke(turn)
+        result = graph.invoke(turn, config=lf_config)
         answer = (result.get("final_answer") or "").strip()
 
         # Persist only the chat turn — not docs/plan/scores.
         append_message(sid, "user", q)
         if answer:
             append_message(sid, "assistant", answer)
+
+        flush_langfuse()
 
         logfire.info(
             "Agent turn complete",
@@ -128,6 +139,7 @@ def invoke_agent(
             docs=len(result.get("documents") or []),
             answer_chars=len(answer),
             history_loaded=len(prior),
+            langfuse=bool(lf_config.get("callbacks")),
         )
 
         out = dict(result)

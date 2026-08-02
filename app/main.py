@@ -73,6 +73,7 @@ async def ready() -> dict[str, object]:
     return {
         "status": "ready",
         "database": settings.has_database,
+        "langfuse": settings.has_langfuse,
     }
 
 

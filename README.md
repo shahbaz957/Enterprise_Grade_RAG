@@ -117,6 +117,7 @@ enterprise-rag/
 | Retriever node (search 15 → rerank 5) | Done |
 | Responder (dual prompts) + LangGraph + thread_id | Done |
 | Neon session memory (messages only) | Done |
+| Langfuse agent tracing | Done |
 | Guardrails / Portkey polish | Next |
 | FlashRank reranker | Skipped (using Jina API instead) |
 | Embeddings + retrieval + rerank | Embeddings + Qdrant upsert done; rerank next |
@@ -246,6 +247,7 @@ Settings live in `app/config.py` and read the root `.env`. Important knobs:
 - `GROQ_*` / `GROQ_FALLBACK_API_KEY` / `JUDGE_GROQ_API_KEY`
 - `QDRANT_CLUSTER_ENDPOINT` or `QDRANT_URL` + `QDRANT_API_KEY` + `QDRANT_COLLECTION`
 - `PORTKEY_*`, `JINA_API_KEY` / `JINA_RERANK_MODEL`, `LANGFUSE_*`, `LOGFIRE_TOKEN` (optional if `.logfire/` credentials exist)
+- `DATABASE_URL` (Neon) for chat session message persistence
 
 Never commit `.env` or `.logfire/`.
 

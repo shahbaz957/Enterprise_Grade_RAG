@@ -7,7 +7,7 @@ from typing import Any, Sequence
 import logfire
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from app.agents.llm import get_chat_model
+from app.agents.llm import invoke_chat
 from app.agents.nodes.planner import _format_history_block, _message_text, build_dialogue
 from app.agents.state import AgentState
 from app.ingestion.loaders.base import ensure_logfire
@@ -69,22 +69,23 @@ def _friendly_reply(state: AgentState) -> str:
         draft = (getattr(plan, "conversational_reply", None) or "").strip()
 
     try:
-        llm = get_chat_model(temperature=0.4)
+        transcript = _format_history_block(build_dialogue(state))
+        user_payload = (
+            f"Conversation so far:\n{transcript}\n\n"
+            f"Planner draft reply (optional to refine):\n{draft or '(none)'}\n\n"
+            "Write the final user-facing reply."
+        )
+        raw = invoke_chat(
+            [
+                SystemMessage(content=FRIENDLY_SYSTEM_PROMPT),
+                HumanMessage(content=user_payload),
+            ],
+            temperature=0.4,
+            run_name="agent.responder.friendly",
+        )
     except RuntimeError:
         return draft or state.get("final_answer") or "Hello — how can I help?"
 
-    transcript = _format_history_block(build_dialogue(state))
-    user_payload = (
-        f"Conversation so far:\n{transcript}\n\n"
-        f"Planner draft reply (optional to refine):\n{draft or '(none)'}\n\n"
-        "Write the final user-facing reply."
-    )
-    raw = llm.invoke(
-        [
-            SystemMessage(content=FRIENDLY_SYSTEM_PROMPT),
-            HumanMessage(content=user_payload),
-        ]
-    )
     text = _message_text(raw).strip()
     return text or draft or "Hello — how can I help?"
 
@@ -96,10 +97,24 @@ def _architect_reply(state: AgentState) -> str:
     search_q = (state.get("current_query") or question).strip()
     context = _format_context(docs)
 
+    transcript = _format_history_block(build_dialogue(state))
+    user_payload = (
+        f"Conversation so far:\n{transcript}\n\n"
+        f"User question:\n{question}\n\n"
+        f"Search query used:\n{search_q}\n\n"
+        f"CONTEXT:\n{context}\n\n"
+        "Write the final architect-grade answer."
+    )
     try:
-        llm = get_chat_model(temperature=0.2)
+        raw = invoke_chat(
+            [
+                SystemMessage(content=ARCHITECT_SYSTEM_PROMPT),
+                HumanMessage(content=user_payload),
+            ],
+            temperature=0.2,
+            run_name="agent.responder.architect",
+        )
     except RuntimeError:
-        # Offline fallback: return stitched context snippets.
         if not docs:
             return "I could not reach an LLM and have no retrieved context."
         bits = []
@@ -110,20 +125,6 @@ def _architect_reply(state: AgentState) -> str:
             )
         return "Retrieved context (LLM unavailable):\n" + "\n".join(bits)
 
-    transcript = _format_history_block(build_dialogue(state))
-    user_payload = (
-        f"Conversation so far:\n{transcript}\n\n"
-        f"User question:\n{question}\n\n"
-        f"Search query used:\n{search_q}\n\n"
-        f"CONTEXT:\n{context}\n\n"
-        "Write the final architect-grade answer."
-    )
-    raw = llm.invoke(
-        [
-            SystemMessage(content=ARCHITECT_SYSTEM_PROMPT),
-            HumanMessage(content=user_payload),
-        ]
-    )
     return _message_text(raw).strip() or "I could not produce an answer from the retrieved context."
 
 
