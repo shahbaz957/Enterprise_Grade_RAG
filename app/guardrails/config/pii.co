@@ -1,0 +1,22 @@
+# PII: Presidio is available via nemoguardrails[sdd] when en_core_web_lg is
+# installed. We also enforce phone/email via a lightweight custom action so
+# acceptance tests work without the large spaCy model download.
+
+define bot refuse pii
+  "Please don't share personal phone numbers or other PII here. I can't store or process personal contact details. Ask a technical or document question instead."
+
+define flow check phone pii
+  $has_pii = execute detect_phone_pii
+  if $has_pii
+    bot refuse pii
+    stop
+
+define user share phone number
+  "My phone number is 555-123-4567"
+  "Call me at +1 415 555 2671"
+  "Here is my mobile: (212) 555-0199"
+  "Please save this number 555.010.9988"
+
+define flow refuse pii share
+  user share phone number
+  bot refuse pii

@@ -74,6 +74,7 @@ async def ready() -> dict[str, object]:
         "status": "ready",
         "database": settings.has_database,
         "langfuse": settings.has_langfuse,
+        "guardrails": settings.has_guardrails,
     }
 
 
@@ -89,6 +90,11 @@ async def graph_info() -> dict[str, object]:
         "entry": "planner",
         "nodes": ["planner", "retriever", "responder"],
         "memory": "neon_messages",
+        "guardrails": {
+            "enabled": settings.has_guardrails,
+            "input": "before graph.invoke",
+            "output": "on final_answer",
+        },
         "routes": {
             "planner→retriever": "intent=technical",
             "planner→responder": "intent=conversational",

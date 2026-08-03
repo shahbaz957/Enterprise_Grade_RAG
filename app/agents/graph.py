@@ -95,6 +95,9 @@ def invoke_agent(
 
     ``session_id`` is preferred. ``thread_id`` is accepted as an alias for
     older clients.
+
+    NeMo Guardrails gate: input rails (+ dialog Colang) run before the graph;
+    output rails run on ``final_answer`` before Neon persistence.
     """
     ensure_logfire()
     configure_langfuse()
@@ -106,23 +109,81 @@ def invoke_agent(
     prior = load_messages(sid, limit=HISTORY_LIMIT)
     history = _history_to_lc_messages(prior)
 
-    turn: dict[str, Any] = {
-        "messages": [*history, HumanMessage(content=q)],
-        "current_query": q,
-        "documents": [],
-        "plan": None,
-        "status": "planning",
-        "intent": "unknown",
-        "final_answer": "",
-        "error": None,
-    }
-
-    graph = get_compiled_graph()
-    lf_config = build_langfuse_config(session_id=sid)
+    from app.guardrails.engine import RailDecisionKind, check_input, check_output
 
     with logfire.span("agent.invoke", session_id=sid, question=q[:200]):
+        # --- Input rails (block / dialog canned reply before graph) ---
+        inbound = check_input(q)
+        if inbound.skip_agent:
+            answer = inbound.content
+            status = (
+                "blocked"
+                if inbound.kind == RailDecisionKind.BLOCKED
+                else "guardrailed"
+            )
+            intent = (
+                "blocked"
+                if inbound.kind == RailDecisionKind.BLOCKED
+                else "conversational"
+            )
+            append_message(sid, "user", q)
+            if answer:
+                append_message(sid, "assistant", answer)
+            flush_langfuse()
+            logfire.info(
+                "Agent turn blocked/handled by input rails",
+                session_id=sid,
+                status=status,
+                intent=intent,
+                rail=inbound.rail,
+                answer_chars=len(answer),
+            )
+            return {
+                "messages": load_messages(sid, limit=HISTORY_LIMIT),
+                "current_query": q,
+                "documents": [],
+                "plan": None,
+                "status": status,
+                "intent": intent,
+                "final_answer": answer,
+                "error": inbound.rail if inbound.kind == RailDecisionKind.BLOCKED else None,
+                "session_id": sid,
+                "thread_id": sid,
+            }
+
+        q = inbound.content  # may be unchanged; mask path would update here
+        turn: dict[str, Any] = {
+            "messages": [*history, HumanMessage(content=q)],
+            "current_query": q,
+            "documents": [],
+            "plan": None,
+            "status": "planning",
+            "intent": "unknown",
+            "final_answer": "",
+            "error": None,
+        }
+
+        graph = get_compiled_graph()
+        lf_config = build_langfuse_config(
+            session_id=sid,
+            tags=["enterprise-rag", "agent", "guardrails"],
+        )
         result = graph.invoke(turn, config=lf_config)
         answer = (result.get("final_answer") or "").strip()
+
+        # --- Output rails (mask / refuse unsafe final answers) ---
+        if answer:
+            outbound = check_output(q, answer)
+            if outbound.kind == RailDecisionKind.BLOCKED:
+                answer = outbound.content
+                result = dict(result)
+                result["final_answer"] = answer
+                result["status"] = "blocked"
+                result["error"] = outbound.rail or "output_rail"
+            elif outbound.kind == RailDecisionKind.MODIFIED:
+                answer = outbound.content
+                result = dict(result)
+                result["final_answer"] = answer
 
         # Persist only the chat turn — not docs/plan/scores.
         append_message(sid, "user", q)

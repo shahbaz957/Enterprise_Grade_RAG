@@ -52,7 +52,27 @@ Planned query path isn't a single retrieve→stuff→generate hop. The graph is 
 Planner decides how to approach the question; retriever hits Qdrant (+ FlashRank reranking); responder drafts the answer. State lives in `AgentState`. This is the structure under `app/agents/` — graph wiring is the next big chunk after ingestion.
 
 ### 4. Guardrails before "trust me bro"
-NeMo Guardrails (Colang) sits in `app/guardrails/` so unsafe / off-policy prompts don't silently sail through. Evals for rails live under `evals/guardrails_eval.py`.
+NeMo Guardrails (Colang 1.x) sits in `app/guardrails/`. Input rails + dialog Colang run **before** the LangGraph invoke; output rails run on `final_answer`.
+
+**Setup (no NVIDIA account):**
+1. `uv sync` (includes `nemoguardrails[sdd,jailbreak]`)
+2. Reuse existing `GROQ_API_KEY` or `OPENAI_API_KEY` — no new NeMo keys
+3. Optional Presidio spaCy model (richer PII): `uv run python -m spacy download en_core_web_lg`
+   Phone/email blocking also works via a built-in regex rail without spaCy.
+4. Keep `GUARDRAILS_ENABLED=true` in `.env` (see `.env.example`)
+
+Config lives at `app/guardrails/config/` (`config.yml` + `*.co`). FastEmbed downloads `all-MiniLM-L6-v2` on first run.
+
+Acceptance:
+```bash
+uv run python -m app.scripts.test_guardrails
+# or
+uv run python evals/guardrails_eval.py
+```
+
+Mentor note: NeMo can be bypassed with clever prompting — keep output rails, later Portkey gateway policies, and this eval suite. For stricter enterprise deployments, prefer Bedrock native rails or a hybrid.
+
+Evals for rails live under `evals/guardrails_eval.py`.
 
 ### 5. Gateway via Portkey
 Portkey is the optional LLM gateway (`app/gateway/`) — useful for routing, fallbacks, and not hard-coding every provider call in business logic.
@@ -118,11 +138,12 @@ enterprise-rag/
 | Responder (dual prompts) + LangGraph + thread_id | Done |
 | Neon session memory (messages only) | Done |
 | Langfuse agent tracing | Done |
-| Guardrails / Portkey polish | Next |
+| NeMo Guardrails (input/output + Colang) | Done |
+| Guardrails / Portkey polish | Portkey next |
 | FlashRank reranker | Skipped (using Jina API instead) |
 | Embeddings + retrieval + rerank | Embeddings + Qdrant upsert done; rerank next |
-| LangGraph query path | Scaffolded |
-| Guardrails + Portkey | Scaffolded |
+| LangGraph query path | Done |
+| Guardrails + Portkey | Guardrails done; Portkey scaffolded |
 | RAGAS evals | Scaffolded |
 | Next.js chat UI | Bootstrap (Next 16) |
 

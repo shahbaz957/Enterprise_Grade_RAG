@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     # --- Neon / Postgres (chat session memory) ---
     database_url: str = ""
 
+    # --- NeMo Guardrails (local Colang config; reuses Groq/OpenAI — no NVIDIA key) ---
+    guardrails_enabled: bool = True
+    guardrails_config_path: str = "app/guardrails/config"
+    # If True, skip rails when NeMo init/check fails; default fail-closed.
+    guardrails_fail_open: bool = False
+
     # --- Paths ---
     data_dir: Path = ROOT_DIR / "DATA"
     true_data_dir: Path = ROOT_DIR / "DATA" / "true_data"
@@ -109,6 +115,23 @@ class Settings(BaseSettings):
     @property
     def has_database(self) -> bool:
         return bool(self.database_url)
+
+    @property
+    def root_dir(self) -> Path:
+        return ROOT_DIR
+
+    @property
+    def has_guardrails(self) -> bool:
+        """Enabled flag + checker LLM + config directory present."""
+        if not self.guardrails_enabled:
+            return False
+        if not (self.has_groq or self.has_openai):
+            return False
+        raw = (self.guardrails_config_path or "").strip()
+        path = Path(raw) if raw else ROOT_DIR / "app" / "guardrails" / "config"
+        if not path.is_absolute():
+            path = ROOT_DIR / path
+        return path.is_dir()
 
 
 @lru_cache

@@ -1,0 +1,41 @@
+define user express greeting
+  "Hello"
+  "Hi"
+  "Hey"
+  "Hi there"
+  "Good morning"
+  "Good afternoon"
+  "Hey assistant"
+
+define bot express greeting
+  "Hello! I can help with questions about your enterprise documents and technical topics. What would you like to know?"
+
+define flow greeting
+  user express greeting
+  bot express greeting
+
+define user express thanks
+  "Thanks"
+  "Thank you"
+  "Thanks a lot"
+  "Appreciate it"
+
+define bot express thanks
+  "You're welcome! Ask another question anytime."
+
+define flow thanks
+  user express thanks
+  bot express thanks
+
+define user express goodbye
+  "Bye"
+  "Goodbye"
+  "See you"
+  "That's all for now"
+
+define bot express goodbye
+  "Goodbye! Come back if you have more document or technical questions."
+
+define flow goodbye
+  user express goodbye
+  bot express goodbye
