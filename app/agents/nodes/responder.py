@@ -82,6 +82,8 @@ def _friendly_reply(state: AgentState) -> str:
             ],
             temperature=0.4,
             run_name="agent.responder.friendly",
+            route="agent.responder",
+            feature="responder_friendly",
         )
     except RuntimeError:
         return draft or state.get("final_answer") or "Hello — how can I help?"
@@ -113,6 +115,8 @@ def _architect_reply(state: AgentState) -> str:
             ],
             temperature=0.2,
             run_name="agent.responder.architect",
+            route="agent.responder",
+            feature="responder_architect",
         )
     except RuntimeError:
         if not docs:

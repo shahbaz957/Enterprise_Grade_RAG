@@ -42,9 +42,23 @@ class Settings(BaseSettings):
     groq_chat_model: str = "llama-3.3-70b-versatile"
     judge_groq_api_key: str = ""
 
-    # --- Portkey gateway ---
+    # --- Portkey gateway (LLM routing / fallback / cache / cost logs) ---
     portkey_api_key: str = ""
+    # Legacy single VK; prefer primary/fallback below.
     portkey_virtual_key: str = ""
+    portkey_virtual_key_primary: str = ""  # Groq (or primary) virtual key slug
+    portkey_virtual_key_fallback: str = ""  # OpenAI (or secondary) virtual key slug
+    # Optional dashboard Config ID — if set, overrides inline JSON config.
+    portkey_config_id: str = ""
+    portkey_strategy: str = "fallback"  # fallback | loadbalance
+    portkey_primary_weight: float = 0.7
+    portkey_fallback_weight: float = 0.3
+    portkey_cache_mode: str = "simple"  # off | simple | semantic
+    portkey_cache_max_age: int = 3600  # seconds
+    portkey_retry_attempts: int = 3
+    portkey_timeout_ms: int = 30_000
+    portkey_environment: str = "dev"
+    portkey_enabled: bool = True
 
     # --- Jina (reranker) ---
     jina_api_key: str = ""
@@ -102,7 +116,18 @@ class Settings(BaseSettings):
 
     @property
     def has_portkey(self) -> bool:
-        return bool(self.portkey_api_key)
+        """Portkey gateway ready: API key + enabled + at least one virtual key (or config id)."""
+        if not self.portkey_enabled:
+            return False
+        if not self.portkey_api_key:
+            return False
+        if self.portkey_config_id:
+            return True
+        return bool(
+            self.portkey_virtual_key_primary
+            or self.portkey_virtual_key
+            or self.portkey_virtual_key_fallback
+        )
 
     @property
     def has_jina(self) -> bool:

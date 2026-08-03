@@ -75,7 +75,30 @@ Mentor note: NeMo can be bypassed with clever prompting — keep output rails, l
 Evals for rails live under `evals/guardrails_eval.py`.
 
 ### 5. Gateway via Portkey
-Portkey is the optional LLM gateway (`app/gateway/`) — useful for routing, fallbacks, and not hard-coding every provider call in business logic.
+Portkey sits in [`app/gateway/`](app/gateway/) as the LLM gateway for agent chat (planner / responder).
+
+**What you get:** virtual keys (no raw provider keys in call path), primary→fallback routing, optional load balance, retries, timeouts, simple/semantic cache, and per-request metadata (`user_id`, `route`, `environment`, `feature`) for logs/cost.
+
+**Setup:**
+1. Create a Portkey API key + Virtual Keys (Groq primary, OpenAI fallback) at https://app.portkey.ai  
+2. Copy into `.env` (see `.env.example`):
+   - `PORTKEY_API_KEY`
+   - `PORTKEY_VIRTUAL_KEY_PRIMARY` (Groq slug)
+   - `PORTKEY_VIRTUAL_KEY_FALLBACK` (OpenAI slug)
+   - `PORTKEY_CACHE_MODE=simple` (or `semantic` / `off`)
+   - `PORTKEY_STRATEGY=fallback` (or `loadbalance`)
+3. Optional: paste the printed inline config into Portkey Configs and set `PORTKEY_CONFIG_ID`
+
+```bash
+# print status + inline config JSON
+uv run python -m app.scripts.test_portkey
+
+# live call (and optional cache timing)
+uv run python -m app.scripts.test_portkey --live --cache
+```
+
+**Fault-tolerance check:** break/revoke the primary virtual key in Portkey → next agent call should hit the fallback VK (visible in Portkey Logs).  
+If Portkey is unset, the app still uses direct Groq/OpenAI as before.
 
 ### 6. Evaluate, don't just vibe-check
 `evals/` is set up for:
@@ -139,11 +162,12 @@ enterprise-rag/
 | Neon session memory (messages only) | Done |
 | Langfuse agent tracing | Done |
 | NeMo Guardrails (input/output + Colang) | Done |
-| Guardrails / Portkey polish | Portkey next |
+| Portkey LLM gateway (VK / fallback / cache) | Done |
+| Guardrails / Portkey polish | Done |
 | FlashRank reranker | Skipped (using Jina API instead) |
 | Embeddings + retrieval + rerank | Embeddings + Qdrant upsert done; rerank next |
 | LangGraph query path | Done |
-| Guardrails + Portkey | Guardrails done; Portkey scaffolded |
+| Guardrails + Portkey | Done |
 | RAGAS evals | Scaffolded |
 | Next.js chat UI | Bootstrap (Next 16) |
 

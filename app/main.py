@@ -70,11 +70,14 @@ async def health() -> dict[str, str]:
 
 @app.get("/ready")
 async def ready() -> dict[str, object]:
+    from app.gateway.portkey_client import gateway_status
+
     return {
         "status": "ready",
         "database": settings.has_database,
         "langfuse": settings.has_langfuse,
         "guardrails": settings.has_guardrails,
+        "portkey": gateway_status(),
     }
 
 

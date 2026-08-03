@@ -254,7 +254,11 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
 
 def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlannerDecision:
     """Call the chat model with history + enforce XOR via PlannerDecision."""
-    llm = get_chat_model(temperature=0.1)
+    llm = get_chat_model(
+        temperature=0.1,
+        route="agent.planner",
+        feature="planner",
+    )
     transcript = _format_history_block(dialogue)
     latest = _message_text(dialogue[-1]) if dialogue else ""
 
