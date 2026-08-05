@@ -70,9 +70,14 @@ async def health() -> dict[str, str]:
 
 @app.get("/ready")
 async def ready() -> dict[str, object]:
+    from app.gateway.portkey_client import gateway_status
+
     return {
         "status": "ready",
         "database": settings.has_database,
+        "langfuse": settings.has_langfuse,
+        "guardrails": settings.has_guardrails,
+        "portkey": gateway_status(),
     }
 
 
@@ -88,6 +93,11 @@ async def graph_info() -> dict[str, object]:
         "entry": "planner",
         "nodes": ["planner", "retriever", "responder"],
         "memory": "neon_messages",
+        "guardrails": {
+            "enabled": settings.has_guardrails,
+            "input": "before graph.invoke",
+            "output": "on final_answer",
+        },
         "routes": {
             "planner→retriever": "intent=technical",
             "planner→responder": "intent=conversational",

@@ -52,10 +52,53 @@ Planned query path isn't a single retrieve→stuff→generate hop. The graph is 
 Planner decides how to approach the question; retriever hits Qdrant (+ FlashRank reranking); responder drafts the answer. State lives in `AgentState`. This is the structure under `app/agents/` — graph wiring is the next big chunk after ingestion.
 
 ### 4. Guardrails before "trust me bro"
-NeMo Guardrails (Colang) sits in `app/guardrails/` so unsafe / off-policy prompts don't silently sail through. Evals for rails live under `evals/guardrails_eval.py`.
+NeMo Guardrails (Colang 1.x) sits in `app/guardrails/`. Input rails + dialog Colang run **before** the LangGraph invoke; output rails run on `final_answer`.
+
+**Setup (no NVIDIA account):**
+1. `uv sync` (includes `nemoguardrails[sdd,jailbreak]`)
+2. Reuse existing `GROQ_API_KEY` or `OPENAI_API_KEY` — no new NeMo keys
+3. Optional Presidio spaCy model (richer PII): `uv run python -m spacy download en_core_web_lg`
+   Phone/email blocking also works via a built-in regex rail without spaCy.
+4. Keep `GUARDRAILS_ENABLED=true` in `.env` (see `.env.example`)
+
+Config lives at `app/guardrails/config/` (`config.yml` + `*.co`). FastEmbed downloads `all-MiniLM-L6-v2` on first run.
+
+Acceptance:
+```bash
+uv run python -m app.scripts.test_guardrails
+# or
+uv run python evals/guardrails_eval.py
+```
+
+Mentor note: NeMo can be bypassed with clever prompting — keep output rails, later Portkey gateway policies, and this eval suite. For stricter enterprise deployments, prefer Bedrock native rails or a hybrid.
+
+Evals for rails live under `evals/guardrails_eval.py`.
 
 ### 5. Gateway via Portkey
-Portkey is the optional LLM gateway (`app/gateway/`) — useful for routing, fallbacks, and not hard-coding every provider call in business logic.
+Portkey sits in [`app/gateway/`](app/gateway/) as the LLM gateway for agent chat (planner / responder).
+
+**What you get:** virtual keys (no raw provider keys in call path), primary→fallback routing, optional load balance, retries, timeouts, simple/semantic cache, and per-request metadata (`user_id`, `route`, `environment`, `feature`) for logs/cost.
+
+**Setup:**
+1. Create a Portkey API key + Virtual Keys (Groq primary, OpenAI fallback) at https://app.portkey.ai  
+2. Copy into `.env` (see `.env.example`):
+   - `PORTKEY_API_KEY`
+   - `PORTKEY_VIRTUAL_KEY_PRIMARY` (Groq slug)
+   - `PORTKEY_VIRTUAL_KEY_FALLBACK` (OpenAI slug)
+   - `PORTKEY_CACHE_MODE=simple` (or `semantic` / `off`)
+   - `PORTKEY_STRATEGY=fallback` (or `loadbalance`)
+3. Optional: paste the printed inline config into Portkey Configs and set `PORTKEY_CONFIG_ID`
+
+```bash
+# print status + inline config JSON
+uv run python -m app.scripts.test_portkey
+
+# live call (and optional cache timing)
+uv run python -m app.scripts.test_portkey --live --cache
+```
+
+**Fault-tolerance check:** break/revoke the primary virtual key in Portkey → next agent call should hit the fallback VK (visible in Portkey Logs).  
+If Portkey is unset, the app still uses direct Groq/OpenAI as before.
 
 ### 6. Evaluate, don't just vibe-check
 `evals/` is set up for:
@@ -117,11 +160,14 @@ enterprise-rag/
 | Retriever node (search 15 → rerank 5) | Done |
 | Responder (dual prompts) + LangGraph + thread_id | Done |
 | Neon session memory (messages only) | Done |
-| Guardrails / Portkey polish | Next |
+| Langfuse agent tracing | Done |
+| NeMo Guardrails (input/output + Colang) | Done |
+| Portkey LLM gateway (VK / fallback / cache) | Done |
+| Guardrails / Portkey polish | Done |
 | FlashRank reranker | Skipped (using Jina API instead) |
 | Embeddings + retrieval + rerank | Embeddings + Qdrant upsert done; rerank next |
-| LangGraph query path | Scaffolded |
-| Guardrails + Portkey | Scaffolded |
+| LangGraph query path | Done |
+| Guardrails + Portkey | Done |
 | RAGAS evals | Scaffolded |
 | Next.js chat UI | Bootstrap (Next 16) |
 
@@ -246,6 +292,7 @@ Settings live in `app/config.py` and read the root `.env`. Important knobs:
 - `GROQ_*` / `GROQ_FALLBACK_API_KEY` / `JUDGE_GROQ_API_KEY`
 - `QDRANT_CLUSTER_ENDPOINT` or `QDRANT_URL` + `QDRANT_API_KEY` + `QDRANT_COLLECTION`
 - `PORTKEY_*`, `JINA_API_KEY` / `JINA_RERANK_MODEL`, `LANGFUSE_*`, `LOGFIRE_TOKEN` (optional if `.logfire/` credentials exist)
+- `DATABASE_URL` (Neon) for chat session message persistence
 
 Never commit `.env` or `.logfire/`.
 

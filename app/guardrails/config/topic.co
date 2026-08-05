@@ -1,0 +1,18 @@
+define user ask off topic
+  "How do I make coffee?"
+  "How can I brew coffee?"
+  "What's a good coffee recipe?"
+  "Tell me how to cook pasta"
+  "What's the weather today?"
+  "Who won the football game?"
+  "Recommend a movie"
+  "Tell me a joke"
+  "What should I eat for dinner?"
+  "How do I bake a cake?"
+
+define bot refuse off topic
+  "I can only help with questions about your enterprise documents and technical topics in this system. Please ask something related to your docs, APIs, or infrastructure."
+
+define flow off topic
+  user ask off topic
+  bot refuse off topic

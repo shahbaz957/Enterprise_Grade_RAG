@@ -24,6 +24,7 @@ from app.agents.llm import get_chat_model
 from app.agents.state import AgentIntent, AgentState, PlanState
 from app.config import settings
 from app.ingestion.loaders.base import ensure_logfire
+from app.observability.langfuse_tracing import get_langfuse_handler
 
 PlannerIntent = Literal["conversational", "technical"]
 
@@ -251,14 +252,13 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
     return data
 
 
-def _build_chat_model() -> Any:
-    """Prefer Groq for planning; fall back to OpenAI chat."""
-    return get_chat_model(temperature=0.1)
-
-
 def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlannerDecision:
     """Call the chat model with history + enforce XOR via PlannerDecision."""
-    llm = _build_chat_model()
+    llm = get_chat_model(
+        temperature=0.1,
+        route="agent.planner",
+        feature="planner",
+    )
     transcript = _format_history_block(dialogue)
     latest = _message_text(dialogue[-1]) if dialogue else ""
 
@@ -268,16 +268,19 @@ def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlannerDecision:
         "Decide the path for the latest user message. "
         "If it is a follow-up, resolve pronouns using earlier turns."
     )
+    prompt = [
+        SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+        HumanMessage(content=user_payload),
+    ]
+    call_config: dict[str, Any] = {"run_name": "agent.planner.llm"}
+    handler = get_langfuse_handler()
+    if handler is not None:
+        call_config["callbacks"] = [handler]
 
     # Prefer native structured output when the provider supports it.
     try:
         structured = llm.with_structured_output(PlannerDecision)
-        result = structured.invoke(
-            [
-                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-                HumanMessage(content=user_payload),
-            ]
-        )
+        result = structured.invoke(prompt, config=call_config)
         if isinstance(result, PlannerDecision):
             return result
         if isinstance(result, dict):
@@ -285,12 +288,7 @@ def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlannerDecision:
     except Exception as exc:  # noqa: BLE001 — fall through to JSON parse path
         logfire.warn("structured_output unavailable; using JSON prompt", error=str(exc))
 
-    raw = llm.invoke(
-        [
-            SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-            HumanMessage(content=user_payload),
-        ]
-    )
+    raw = llm.invoke(prompt, config=call_config)
     content = _message_text(raw)
     return parse_planner_decision(_extract_json_object(content))
 
