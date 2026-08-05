@@ -112,6 +112,12 @@ enterprise-rag/
 | OpenAI embeddings (batch 50, 4 retries) | Done |
 | Processor + Qdrant upsert (CLI) | Done |
 | Qdrant search + Jina rerank | Done |
+| AgentState + planner contract | Done |
+| History-aware planner (LLM) | Done |
+| Retriever node (search 15 → rerank 5) | Done |
+| Responder (dual prompts) + LangGraph + thread_id | Done |
+| Neon session memory (messages only) | Done |
+| Guardrails / Portkey polish | Next |
 | FlashRank reranker | Skipped (using Jina API instead) |
 | Embeddings + retrieval + rerank | Embeddings + Qdrant upsert done; rerank next |
 | LangGraph query path | Scaffolded |
@@ -197,6 +203,37 @@ uv run python -m app.ingestion.processor --universal
 
 # dry run (no Qdrant write)
 uv run python -m app.ingestion.processor --file DATA/true_data/cronjobs.docx --no-upsert
+```
+
+### 6. Ask the agent (Neon session memory)
+Browser / UI should:
+1. `POST /sessions` → store `session_id` in localStorage
+2. `GET /sessions/{id}/messages` on load to paint history
+3. `POST /query` with `{ "question": "...", "session_id": "<id>" }` each turn
+
+```bash
+uv run python -m uvicorn app.main:app --reload --port 8000
+
+# new session
+curl -X POST http://127.0.0.1:8000/sessions
+
+# chat (reuse session_id)
+curl -X POST http://127.0.0.1:8000/query ^
+  -H "Content-Type: application/json" ^
+  -d "{\"question\":\"How do Jobs use a work queue?\",\"session_id\":\"YOUR-UUID\"}"
+
+# reload transcript
+curl http://127.0.0.1:8000/sessions/YOUR-UUID/messages
+```
+
+We persist **only** user/assistant messages in Neon — not full LangGraph checkpoints
+(docs, plan objects, scores). The graph runs stateless each turn with history hydrated from the DB.
+
+Or in Python:
+```python
+from app.agents import invoke_agent
+r = invoke_agent("What is a DaemonSet?", session_id=None)  # creates session
+r2 = invoke_agent("how do I monitor it?", session_id=r["session_id"])
 ```
 
 ---
