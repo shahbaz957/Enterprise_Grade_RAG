@@ -67,12 +67,10 @@ Acceptance:
 ```bash
 uv run python -m app.scripts.test_guardrails
 # or
-uv run python evals/guardrails_eval.py
+uv run python -m evals.guardrails_eval --unit-only
 ```
 
-Mentor note: NeMo can be bypassed with clever prompting — keep output rails, later Portkey gateway policies, and this eval suite. For stricter enterprise deployments, prefer Bedrock native rails or a hybrid.
-
-Evals for rails live under `evals/guardrails_eval.py`.
+Mentor note: NeMo can be bypassed with clever prompting — keep output rails, Portkey gateway policies, and this eval suite. For stricter enterprise deployments, prefer Bedrock native rails or a hybrid.
 
 ### 5. Gateway via Portkey
 Portkey sits in [`app/gateway/`](app/gateway/) as the LLM gateway for agent chat (planner / responder).
@@ -100,15 +98,43 @@ uv run python -m app.scripts.test_portkey --live --cache
 **Fault-tolerance check:** break/revoke the primary virtual key in Portkey → next agent call should hit the fallback VK (visible in Portkey Logs).  
 If Portkey is unset, the app still uses direct Groq/OpenAI as before.
 
-### 6. Evaluate, don't just vibe-check
-`evals/` is set up for:
+### 6. Evaluate, don't just vibe-check (RAGAS suite)
 
-- a golden dataset
-- RAGAS metrics
-- a pipeline runner
-- optional Streamlit UI for local evals only (production UI is Next.js)
+`evals/` is a runnable suite — not slides:
 
-If retrieval quality isn't measured, it's marketing.
+| Step | Module | What it does |
+|------|--------|----------------|
+| Golden set | [`evals/golden_dataset.json`](evals/golden_dataset.json) | 15 K8s/RAG Q&A + 6 guardrail cases (`should_block`, `expected_tools`, `reference`) |
+| Live pipeline | [`evals/pipeline.py`](evals/pipeline.py) | `POST /query` → stores `actual_response`, `contexts`, `tools` |
+| RAGAS metrics | [`evals/metrics.py`](evals/metrics.py) | Faithfulness, Answer Relevancy, Context Precision/Recall, Answer Correctness + tool Jaccard |
+| Guardrails matrix | [`evals/guardrails_eval.py`](evals/guardrails_eval.py) | TP/TN/FP/FN for `should_block` vs blocked |
+
+**Prereqs:** API up, Qdrant ingested (`true_data`), `OPENAI_API_KEY` (embeddings for some metrics), `JUDGE_GROQ_API_KEY` (or Groq) for the judge LLM.
+
+```bash
+# terminal A
+uv run python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# terminal B — full suite
+uv run python -m evals
+
+# or step by step
+uv run python -m evals.pipeline --limit 5
+uv run python -m evals.metrics
+uv run python -m evals.guardrails_eval
+
+# NeMo unit rails only (no API)
+uv run python -m evals.guardrails_eval --unit-only
+```
+
+Reports land in `evals/results/` (`latest_run.json`, `metrics_report.json`, `guardrails_report.json`).
+
+**Metrics in plain English:**
+- **Faithfulness** — answer claims supported by retrieved context (hallucination catch); score ≈ grounded_claims / total_claims
+- **Answer Relevancy** — does the answer address the question?
+- **Context Precision / Recall** — were the right chunks retrieved and ranked well?
+- **Answer Correctness** — mix of factual overlap + semantic similarity vs reference
+- **Tool correctness** — expected vs actual tools (e.g. `retriever` called or skipped); Jaccard / exact, **zero LLM cost**
 
 ### 7. Observability as a default
 Logfire is configured (project credentials under `.logfire/`, ignored by git). Loader spans already ship. FastAPI instrumentation and Langfuse hooks are part of the longer plan.
@@ -130,7 +156,12 @@ enterprise-rag/
 │   ├── services/retrieval/   # embeddings ✅, Qdrant search+upsert ✅, Jina rerank ✅
 │   ├── guardrails/           # NeMo rails
 │   └── gateway/              # Portkey client
-├── evals/                    # RAGAS + golden set + guardrail checks
+├── evals/                    # RAGAS suite
+│   ├── golden_dataset.json   # 15 RAG + 6 guardrail cases
+│   ├── pipeline.py           # live POST /query enrichment
+│   ├── metrics.py            # RAGAS + tool correctness
+│   ├── guardrails_eval.py    # confusion matrix
+│   └── results/              # latest_run + reports (gitignored)
 ├── web/                      # Next.js App Router UI
 ├── DATA/true_data/
 ├── DATA/noisy_data/
@@ -168,7 +199,7 @@ enterprise-rag/
 | Embeddings + retrieval + rerank | Embeddings + Qdrant upsert done; rerank next |
 | LangGraph query path | Done |
 | Guardrails + Portkey | Done |
-| RAGAS evals | Scaffolded |
+| RAGAS eval suite (golden + pipeline + metrics + confusion matrix) | Done |
 | Next.js chat UI | Bootstrap (Next 16) |
 
 I'm building this layer by layer on purpose — ingestion that actually works on my datasets before pretending the chat endpoint is "enterprise ready."
@@ -307,6 +338,13 @@ I'm not optimizing for "another LangChain hello world." I'm optimizing for decis
 - agent graph instead of a single prompt
 - guardrails + evals as first-class folders
 - observability from day one on ingestion
+
+### Resume / LinkedIn bullets (eval + safety)
+
+- Built a **RAGAS evaluation suite** with a 21-case golden set (15 grounded K8s/RAG Q&A + 6 jailbreak/off-topic/PII), live `/query` pipeline, and scored **Faithfulness, Answer Relevancy, Context Precision/Recall, Answer Correctness**.
+- Added **tool-correctness** checks (expected vs actual retriever use via Jaccard/exact) for the agentic path with **zero judge LLM cost**.
+- Measured guardrail quality with a **TP/TN/FP/FN confusion matrix** (`should_block` vs blocked) on top of NeMo input/output rails.
+- Separated **judge LLM credentials** (`JUDGE_GROQ_API_KEY`) from the serving path so evals do not starve production inference.
 
 If you're reading this on GitHub and want to poke at something specific (retrieval quality, chunking strategy, UI), open an issue or just star it and stalk the commits — that's where the real progress shows up.
 
