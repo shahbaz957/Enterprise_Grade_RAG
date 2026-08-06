@@ -20,7 +20,11 @@ import logfire
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from app.agents.llm import get_chat_model
+from app.agents.llm import (
+    get_chat_model,
+    get_direct_chat_model,
+    is_portkey_config_error,
+)
 from app.agents.state import AgentIntent, AgentState, PlanState
 from app.config import settings
 from app.ingestion.loaders.base import ensure_logfire
@@ -252,13 +256,31 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
     return data
 
 
+def _llm_plan_with_model(
+    llm: Any,
+    prompt: list[BaseMessage],
+    call_config: dict[str, Any],
+) -> PlannerDecision:
+    """Run planner against one chat model (structured, then JSON fallback)."""
+    try:
+        structured = llm.with_structured_output(PlannerDecision)
+        result = structured.invoke(prompt, config=call_config)
+        if isinstance(result, PlannerDecision):
+            return result
+        if isinstance(result, dict):
+            return parse_planner_decision(result)
+    except Exception as exc:  # noqa: BLE001 — fall through to JSON parse path
+        if is_portkey_config_error(exc):
+            raise
+        logfire.warn("structured_output unavailable; using JSON prompt", error=str(exc))
+
+    raw = llm.invoke(prompt, config=call_config)
+    content = _message_text(raw)
+    return parse_planner_decision(_extract_json_object(content))
+
+
 def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlannerDecision:
     """Call the chat model with history + enforce XOR via PlannerDecision."""
-    llm = get_chat_model(
-        temperature=0.1,
-        route="agent.planner",
-        feature="planner",
-    )
     transcript = _format_history_block(dialogue)
     latest = _message_text(dialogue[-1]) if dialogue else ""
 
@@ -277,20 +299,31 @@ def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlannerDecision:
     if handler is not None:
         call_config["callbacks"] = [handler]
 
-    # Prefer native structured output when the provider supports it.
+    llm = get_chat_model(
+        temperature=0.1,
+        route="agent.planner",
+        feature="planner",
+    )
     try:
-        structured = llm.with_structured_output(PlannerDecision)
-        result = structured.invoke(prompt, config=call_config)
-        if isinstance(result, PlannerDecision):
-            return result
-        if isinstance(result, dict):
-            return parse_planner_decision(result)
-    except Exception as exc:  # noqa: BLE001 — fall through to JSON parse path
-        logfire.warn("structured_output unavailable; using JSON prompt", error=str(exc))
-
-    raw = llm.invoke(prompt, config=call_config)
-    content = _message_text(raw)
-    return parse_planner_decision(_extract_json_object(content))
+        return _llm_plan_with_model(llm, prompt, call_config)
+    except Exception as exc:
+        if (
+            settings.has_portkey
+            and is_portkey_config_error(exc)
+            and (settings.has_groq or settings.has_openai)
+        ):
+            logfire.warn(
+                "Portkey blocked inline config in planner; falling back to direct LLM. "
+                "Set PORTKEY_CONFIG_ID=pc-... "
+                "(uv run python -m app.scripts.print_portkey_config)",
+                error=str(exc)[:240],
+            )
+            return _llm_plan_with_model(
+                get_direct_chat_model(temperature=0.1),
+                prompt,
+                call_config,
+            )
+        raise
 
 
 def planner_node(state: AgentState) -> dict[str, Any]:
@@ -316,7 +349,7 @@ def planner_node(state: AgentState) -> dict[str, Any]:
                     ),
                     rationale="empty query",
                 )
-            elif settings.has_groq or settings.has_openai:
+            elif settings.has_portkey or settings.has_groq or settings.has_openai:
                 decision = _llm_plan(dialogue)
             else:
                 logfire.warn("No LLM keys — using rule stub planner")

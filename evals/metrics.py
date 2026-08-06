@@ -1,7 +1,7 @@
 """Step 3 — RAGAS metrics + tool correctness on enriched pipeline results.
 
-Uses a separate JUDGE LLM key (JUDGE_GROQ_API_KEY, else GROQ/OpenAI) so scoring
-does not share the same rate limits as the agent under test.
+Uses USE_OPENAI_LLM for the judge chat model (OpenAI when true, Groq when false).
+OpenAI embeddings are still required for some RAGAS metrics.
 
 Metrics:
   - Faithfulness
@@ -28,26 +28,12 @@ from evals.common import DEFAULT_RESULTS_PATH, RESULTS_DIR, load_results, save_r
 
 
 def _judge_chat_model():
-    """Judge LLM for RAGAS — prefers JUDGE_GROQ_API_KEY."""
+    """Judge LLM for RAGAS — follows USE_OPENAI_LLM (same as guardrails/direct)."""
     from app.config import settings
 
-    if settings.judge_groq_api_key:
-        from langchain_groq import ChatGroq
-
-        return ChatGroq(
-            model=settings.groq_chat_model,
-            api_key=settings.judge_groq_api_key,
-            temperature=0,
-        )
-    if settings.has_groq:
-        from langchain_groq import ChatGroq
-
-        return ChatGroq(
-            model=settings.groq_chat_model,
-            api_key=settings.active_groq_api_key,
-            temperature=0,
-        )
-    if settings.has_openai:
+    if settings.use_openai_llm:
+        if not settings.has_openai:
+            raise RuntimeError("USE_OPENAI_LLM=true but OPENAI_API_KEY is unset")
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(
@@ -55,8 +41,18 @@ def _judge_chat_model():
             api_key=settings.openai_api_key,
             temperature=0,
         )
-    raise RuntimeError(
-        "No judge LLM configured. Set JUDGE_GROQ_API_KEY or GROQ_API_KEY / OPENAI_API_KEY."
+
+    key = settings.judge_groq_api_key or settings.active_groq_api_key
+    if not key:
+        raise RuntimeError(
+            "USE_OPENAI_LLM=false — set JUDGE_GROQ_API_KEY or GROQ_API_KEY."
+        )
+    from langchain_groq import ChatGroq
+
+    return ChatGroq(
+        model=settings.groq_chat_model,
+        api_key=key,
+        temperature=0,
     )
 
 

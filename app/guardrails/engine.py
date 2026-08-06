@@ -1,17 +1,19 @@
 """NeMo Guardrails engine — input/output gates around the LangGraph agent.
 
-No NVIDIA account is required. The checker LLM reuses Groq (preferred) or OpenAI
-from app settings. Dialog Colang flows use FastEmbed + LLM intent confirm;
-passthrough mode forwards unmatched turns to the agent instead of NeMo generation.
+No NVIDIA account is required. The checker LLM follows USE_OPENAI_LLM
+(OpenAI when true, Groq when false). Dialog Colang flows use FastEmbed + LLM
+intent confirm; passthrough mode forwards unmatched turns to the agent.
 """
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Optional, TypeVar
 
 import logfire
 
@@ -28,6 +30,7 @@ DEFAULT_BLOCK_MESSAGE = (
 _rails_lock = threading.Lock()
 _rails: Any = None
 _rails_init_error: Optional[str] = None
+_T = TypeVar("_T")
 
 
 class RailDecisionKind(str, Enum):
@@ -52,6 +55,25 @@ class RailDecision:
         return self.kind in (RailDecisionKind.BLOCKED, RailDecisionKind.HANDLED)
 
 
+def _run_coro_sync(coro: Awaitable[_T]) -> _T:
+    """Run an async NeMo API from sync code even when FastAPI's loop is running.
+
+    NeMo's sync ``generate`` / ``check`` raise if an event loop is already
+    running (our ``async def /query`` path). Prefer ``generate_async`` /
+    ``check_async`` and bridge via a worker thread when needed.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    def _runner() -> _T:
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_runner).result()
+
+
 def _config_path() -> Path:
     raw = (settings.guardrails_config_path or "").strip()
     if raw:
@@ -63,17 +85,10 @@ def _config_path() -> Path:
 
 
 def _model_entry_from_settings() -> dict[str, Any]:
-    if settings.has_groq:
-        return {
-            "type": "main",
-            "engine": "openai",
-            "model": settings.groq_chat_model,
-            "parameters": {
-                "base_url": "https://api.groq.com/openai/v1",
-                "api_key": settings.active_groq_api_key,
-            },
-        }
-    if settings.has_openai:
+    """NeMo checker LLM — same USE_OPENAI_LLM flag as the rest of the app."""
+    if settings.use_openai_llm:
+        if not settings.has_openai:
+            raise RuntimeError("USE_OPENAI_LLM=true but OPENAI_API_KEY is unset")
         return {
             "type": "main",
             "engine": "openai",
@@ -82,10 +97,17 @@ def _model_entry_from_settings() -> dict[str, Any]:
                 "api_key": settings.openai_api_key,
             },
         }
-    raise RuntimeError(
-        "Guardrails require GROQ_API_KEY or OPENAI_API_KEY for the checker LLM"
-    )
-
+    if not settings.has_groq:
+        raise RuntimeError("USE_OPENAI_LLM=false but GROQ_API_KEY is unset")
+    return {
+        "type": "main",
+        "engine": "openai",
+        "model": settings.groq_chat_model,
+        "parameters": {
+            "base_url": "https://api.groq.com/openai/v1",
+            "api_key": settings.active_groq_api_key,
+        },
+    }
 
 async def _passthrough_fn(context: dict, events: list) -> str:
     return CONTINUE_TO_AGENT
@@ -100,12 +122,10 @@ def _extract_response_text(response: Any) -> str:
         content = response.get("content")
         if isinstance(content, str):
             return content.strip()
-        # GenerationResponse-like
         if "response" in response and isinstance(response["response"], list):
             for msg in reversed(response["response"]):
                 if isinstance(msg, dict) and msg.get("content"):
                     return str(msg["content"]).strip()
-    # pydantic GenerationResponse
     content = getattr(response, "response", None) or getattr(response, "content", None)
     if isinstance(content, str):
         return content.strip()
@@ -131,7 +151,6 @@ def _blocking_rail_name(response: Any) -> Optional[str]:
     if not activated:
         return None
     for rail in activated:
-        # ActivatedRail objects or dicts
         stopped = getattr(rail, "stop", None)
         if stopped is None and isinstance(rail, dict):
             stopped = rail.get("stop")
@@ -143,7 +162,6 @@ def _blocking_rail_name(response: Any) -> Optional[str]:
             decisions = rail.get("decisions")
         if stopped or (isinstance(decisions, list) and "stop" in decisions):
             return str(name) if name else "rail"
-        # Some versions mark type + stop via "additional_info"
     return None
 
 
@@ -198,7 +216,11 @@ def check_input(text: str) -> RailDecision:
     """Run input rails + dialog Colang. Sync for invoke_agent."""
     q = (text or "").strip()
     if not q:
-        return RailDecision(kind=RailDecisionKind.BLOCKED, content=DEFAULT_BLOCK_MESSAGE, rail="empty")
+        return RailDecision(
+            kind=RailDecisionKind.BLOCKED,
+            content=DEFAULT_BLOCK_MESSAGE,
+            rail="empty",
+        )
 
     if not settings.guardrails_enabled:
         return RailDecision(kind=RailDecisionKind.PASSED, content=q)
@@ -207,7 +229,6 @@ def check_input(text: str) -> RailDecision:
         try:
             rails = get_rails()
         except Exception as exc:
-            # Fail open only if explicitly allowed; default fail closed for safety gate.
             if settings.guardrails_fail_open:
                 logfire.warn("Guardrails init failed; fail-open", error=str(exc))
                 return RailDecision(kind=RailDecisionKind.PASSED, content=q)
@@ -218,17 +239,19 @@ def check_input(text: str) -> RailDecision:
             )
 
         try:
-            response = rails.generate(
-                messages=[{"role": "user", "content": q}],
-                options={
-                    "rails": {
-                        "input": True,
-                        "dialog": True,
-                        "retrieval": False,
-                        "output": False,
+            response = _run_coro_sync(
+                rails.generate_async(
+                    messages=[{"role": "user", "content": q}],
+                    options={
+                        "rails": {
+                            "input": True,
+                            "dialog": True,
+                            "retrieval": False,
+                            "output": False,
+                        },
+                        "log": {"activated_rails": True},
                     },
-                    "log": {"activated_rails": True},
-                },
+                )
             )
         except Exception as exc:
             logfire.exception("Guardrails input check failed", error=str(exc))
@@ -244,9 +267,6 @@ def check_input(text: str) -> RailDecision:
         blocking = _blocking_rail_name(response)
 
         if content == CONTINUE_TO_AGENT or content.startswith(CONTINUE_TO_AGENT):
-            # Passthrough — optional masked user text lives in context; use original q
-            # unless an input rail modified the message (Presidio mask would not use
-            # detect+stop). detect blocks; mask would modify — we use detect on input.
             logfire.info("Guardrails input passed", rail=None)
             return RailDecision(kind=RailDecisionKind.PASSED, content=q)
 
@@ -262,7 +282,6 @@ def check_input(text: str) -> RailDecision:
                 rail=blocking,
             )
 
-        # Dialog canned reply (greeting / off-topic / jailbreak Colang) or refuse.
         logfire.info(
             "Guardrails input handled by dialog",
             answer_chars=len(content),
@@ -302,12 +321,14 @@ def check_output(user_text: str, answer: str) -> RailDecision:
             from nemoguardrails.rails.llm.options import RailStatus, RailType
 
             rails = get_rails()
-            result = rails.check(
-                [
-                    {"role": "user", "content": (user_text or "").strip()},
-                    {"role": "assistant", "content": a},
-                ],
-                rail_types=[RailType.OUTPUT],
+            result = _run_coro_sync(
+                rails.check_async(
+                    [
+                        {"role": "user", "content": (user_text or "").strip()},
+                        {"role": "assistant", "content": a},
+                    ],
+                    rail_types=[RailType.OUTPUT],
+                )
             )
         except Exception as exc:
             logfire.exception("Guardrails output check failed", error=str(exc))

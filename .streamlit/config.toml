@@ -1,0 +1,10 @@
+# Quiet noisy file-watcher probes into transformers/torchvision site-packages.
+[server]
+fileWatcherType = "none"
+headless = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"

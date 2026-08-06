@@ -85,18 +85,24 @@ Portkey sits in [`app/gateway/`](app/gateway/) as the LLM gateway for agent chat
    - `PORTKEY_VIRTUAL_KEY_FALLBACK` (OpenAI slug)
    - `PORTKEY_CACHE_MODE=simple` (or `semantic` / `off`)
    - `PORTKEY_STRATEGY=fallback` (or `loadbalance`)
-3. Optional: paste the printed inline config into Portkey Configs and set `PORTKEY_CONFIG_ID`
+3. **Saved Config ID (required if your org has `block_inline_config`):**  
+   ```bash
+   uv run python -m app.scripts.print_portkey_config
+   ```  
+   Paste the JSON into Portkey → Configs → Create, then set `PORTKEY_CONFIG_ID=pc-...`.  
+   Keep `PORTKEY_ALLOW_INLINE_CONFIG=false` (default). Without a Config ID the app uses a single virtual key only (no automatic fallback/cache in the request).
 
 ```bash
-# print status + inline config JSON
+# print status + config JSON for the dashboard
+uv run python -m app.scripts.print_portkey_config
 uv run python -m app.scripts.test_portkey
 
 # live call (and optional cache timing)
 uv run python -m app.scripts.test_portkey --live --cache
 ```
 
-**Fault-tolerance check:** break/revoke the primary virtual key in Portkey → next agent call should hit the fallback VK (visible in Portkey Logs).  
-If Portkey is unset, the app still uses direct Groq/OpenAI as before.
+**Fault-tolerance check:** with `PORTKEY_CONFIG_ID` set, break/revoke the primary virtual key → next agent call should hit the fallback VK (visible in Portkey Logs).  
+If Portkey is unset (or blocks inline config with no Config ID), the app falls back to direct Groq/OpenAI when those keys are present.
 
 ### 6. Evaluate, don't just vibe-check (RAGAS suite)
 
@@ -128,6 +134,20 @@ uv run python -m evals.guardrails_eval --unit-only
 ```
 
 Reports land in `evals/results/` (`latest_run.json`, `metrics_report.json`, `guardrails_report.json`).
+
+### Eval Monitor UI (Streamlit — separate from Next.js chat)
+
+Local dashboard to watch scores over time (not the product UI):
+
+```bash
+# API must be running for live evals
+uv run python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# Eval monitor
+uv run streamlit run eval_monitor.py
+```
+
+Open http://localhost:8501 → **Run full eval suite** or **Load saved results**. Tabs show RAGAS, tool correctness, guardrail TP/TN/FP/FN, and a case explorer. Details: [`evals_ui/README.md`](evals_ui/README.md).
 
 **Metrics in plain English:**
 - **Faithfulness** — answer claims supported by retrieved context (hallucination catch); score ≈ grounded_claims / total_claims
@@ -162,7 +182,10 @@ enterprise-rag/
 │   ├── metrics.py            # RAGAS + tool correctness
 │   ├── guardrails_eval.py    # confusion matrix
 │   └── results/              # latest_run + reports (gitignored)
-├── web/                      # Next.js App Router UI
+├── evals_ui/                 # Streamlit eval monitor (local only)
+│   ├── app.py
+│   └── services.py
+├── web/                      # Next.js App Router UI (product chat)
 ├── DATA/true_data/
 ├── DATA/noisy_data/
 ├── processed_data/
@@ -200,7 +223,8 @@ enterprise-rag/
 | LangGraph query path | Done |
 | Guardrails + Portkey | Done |
 | RAGAS eval suite (golden + pipeline + metrics + confusion matrix) | Done |
-| Next.js chat UI | Bootstrap (Next 16) |
+| Streamlit Eval Monitor (`evals_ui/`) | Done |
+| Next.js chat UI | Done (Hearth — cozy dark chat + proxy) |
 
 I'm building this layer by layer on purpose — ingestion that actually works on my datasets before pretending the chat endpoint is "enterprise ready."
 
@@ -248,12 +272,19 @@ python -m uvicorn app.main:app --reload --port 8000
 ### 3. Frontend (separate terminal)
 ```bash
 cd web
+cp .env.local.example .env.local   # set RAG_BACKEND_URL + optional RAG_API_KEY
 npm install
 npm run dev
 ```
 
-UI: http://localhost:3000
+UI: http://localhost:3000 (cozy chat — **Hearth**)
 
+The browser talks only to Next.js `/api/query`; the route proxies to FastAPI and attaches `Authorization: Bearer $RAG_API_KEY` when set. Never put the API key in client code.
+
+**Prod auth / rate limit (backend `.env`):**
+- `RAG_API_KEY` (+ optional `RAG_JWT_SECRET`) — required for `/query` when `DEBUG=false`
+- `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` — Redis rate limit; in-memory fallback locally
+- `RATE_LIMIT_PER_MINUTE=60`
 ### 4. Try a loader
 ```bash
 uv run python app/scripts/smoke_loaders.py
