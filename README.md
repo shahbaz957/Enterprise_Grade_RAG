@@ -4,9 +4,6 @@
 
 AskPod is an end-to-end RAG platform over messy enterprise documents (Kubernetes ops guides, HTML exports, Office files, noisy PDFs). It combines **agentic routing**, **two-stage retrieval**, **LLM gateway fault tolerance**, **NeMo guardrails**, **session memory**, **measurable evals**, and a **Next.js chat UI** — the same class of concerns you see in production AI backends, implemented deliberately layer by layer.
 
-> **Current phase:** Batch ingestion → static vectors in Qdrant → query-time retrieval.  
-> **Next phase:** Real-time RAG with **Change Data Capture (CDC)** so document updates propagate to the vector index without full re-ingest.
-
 <p align="center">
   <img src="web/public/rag.png" alt="AskPod chat UI — agentic RAG with Markdown answers, sources, and guardrails" width="920" />
 </p>
@@ -17,7 +14,7 @@ AskPod is an end-to-end RAG platform over messy enterprise documents (Kubernetes
 ## Author
 
 **Mirza Shahbaz Ali Baig**  
-Backend & AI systems — building this in public to master production RAG fundamentals before moving to streaming ingestion.
+Backend & AI systems — building this in public to master production RAG fundamentals.
 
 ---
 
@@ -101,7 +98,7 @@ flowchart TB
 5. **Output guardrails** — Mask / block unsafe final answers.
 6. **Persist** — Append user + assistant messages to Neon (`session_id`); docs/plan/scores are ephemeral per turn.
 
-### Ingestion path (batch — no CDC yet)
+### Ingestion path (batch)
 
 ```
 load → chunk (~1200 chars, 150 overlap) → embed (OpenAI batch 50) → upsert Qdrant
@@ -336,26 +333,6 @@ Key environment variables (see `.env.example` for full list):
 
 ---
 
-## Roadmap: real-time RAG with CDC
-
-This project intentionally ships **batch ingest first** — the same maturity order most teams follow before adding streaming complexity.
-
-| Phase | Status | Description |
-|-------|--------|-------------|
-| **1. Batch RAG** | ✅ Current | Load → chunk → embed → Qdrant; static index; agentic query path |
-| **2. Eval & safety** | ✅ Done | RAGAS, guardrails matrix, Portkey gateway, auth, rate limits |
-| **3. Real-time ingest (CDC)** | 🔜 Next | Propagate document create/update/delete to Qdrant without full re-ingest |
-| **4. Streaming answers** | Planned | Token streaming from responder to AskPod UI |
-| **5. Hybrid retrieval** | Planned | Metadata filters, corpus routing, optional sparse + dense |
-
-### What CDC will add
-- **Change detection** — watch `DATA/`, S3, Confluence, or Postgres logical replication for doc changes
-- **Incremental upsert/delete** — stable UUID5 point IDs already support overwrite; add tombstone deletes on doc removal
-- **Near-real-time index freshness** — minutes, not nightly batch jobs
-- **Eval regression on drift** — re-run golden set when corpus version changes
-
----
-
 ## Smoke tests & scripts
 
 ```bash
@@ -395,4 +372,6 @@ docker run -p 8000:8000 --env-file .env askpod-api
 Personal portfolio / learning project.  
 **Mirza Shahbaz Ali Baig** — [mirzashahbazbaig724@gmail.com](mailto:mirzashahbazbaig724@gmail.com)
 
-If this repo helps you think about production RAG differently, consider starring it — and watch the commits as CDC lands next.
+**Follow-up (separate project):** Real-time RAG with **Change Data Capture (CDC)** — incremental index updates when source documents change, without full re-ingest.
+
+If this repo helps you think about production RAG differently, consider starring it.
