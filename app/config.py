@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     )
 
     # --- App ---
-    app_name: str = "Enterprise RAG Backend"
+    app_name: str = "AskPod"
     app_version: str = "0.1.0"
     debug: bool = False
     backend_url: str = "http://localhost:8000"
@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     guardrails_config_path: str = "app/guardrails/config"
     # If True, skip rails when NeMo init/check fails; default fail-closed.
     guardrails_fail_open: bool = False
+    # Pre-load guardrails + agent graph at startup (avoids multi-minute first /query).
+    warmup_on_startup: bool = True
 
     # --- Paths ---
     true_data_dir: Path = ROOT_DIR / "DATA" / "true_data"

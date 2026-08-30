@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useTransition, type KeyboardEvent } from "react";
+import MarkdownMessage from "@/components/MarkdownMessage";
 import {
   ApiError,
-  newThreadId,
+  newSessionId,
   postQuery,
   type AgentIntent,
   type QueryResponse,
@@ -88,7 +89,7 @@ function SourcesPanel({
 }
 
 export default function ChatApp() {
-  const [threadId, setThreadId] = useState("");
+  const [sessionId, setSessionId] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +100,7 @@ export default function ChatApp() {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
-    setThreadId(newThreadId());
+    setSessionId(newSessionId());
   }, []);
 
   useEffect(() => {
@@ -113,8 +114,8 @@ export default function ChatApp() {
     [messages],
   );
 
-  function startNewThread() {
-    setThreadId(newThreadId());
+  function startNewSession() {
+    setSessionId(newSessionId());
     setMessages([]);
     setError(null);
     setActiveDocs([]);
@@ -130,7 +131,7 @@ export default function ChatApp() {
 
   function submit() {
     const question = draft.trim();
-    if (!question || pending || !threadId) return;
+    if (!question || pending || !sessionId) return;
 
     const userMsg: ChatMessage = {
       id: `u-${Date.now()}`,
@@ -145,10 +146,10 @@ export default function ChatApp() {
       try {
         const res: QueryResponse = await postQuery({
           question,
-          thread_id: threadId,
+          session_id: sessionId,
         });
-        if (res.thread_id && res.thread_id !== threadId) {
-          setThreadId(res.thread_id);
+        if (res.session_id && res.session_id !== sessionId) {
+          setSessionId(res.session_id);
         }
         const assistant: ChatMessage = {
           id: `a-${Date.now()}`,
@@ -201,15 +202,15 @@ export default function ChatApp() {
 
       <header className="topbar">
         <div className="brand-block">
-          <p className="brand">Hearth</p>
-          <p className="tagline">Enterprise knowledge, quietly answered</p>
+          <p className="brand">AskPod</p>
+          <p className="tagline">Kubernetes knowledge, answered instantly</p>
         </div>
         <div className="top-actions">
           {lastAssistant?.intent ? (
             <IntentBadge intent={lastAssistant.intent} blocked={lastAssistant.blocked} />
           ) : null}
-          <button type="button" className="ghost-btn" onClick={startNewThread}>
-            New thread
+          <button type="button" className="ghost-btn" onClick={startNewSession}>
+            New session
           </button>
         </div>
       </header>
@@ -218,7 +219,7 @@ export default function ChatApp() {
         <main className="chat-pane">
           {!hasTranscript ? (
             <section className="hero-empty">
-              <h1 className="brand-hero">Hearth</h1>
+              <h1 className="brand-hero">AskPod</h1>
               <p className="hero-copy">
                 Ask about your Kubernetes docs — or just say hello. Guardrails keep the room safe.
               </p>
@@ -231,12 +232,18 @@ export default function ChatApp() {
                   className={`bubble ${m.role} ${m.blocked ? "blocked" : ""}`}
                 >
                   <div className="bubble-meta">
-                    <span className="who">{m.role === "user" ? "You" : "Hearth"}</span>
+                    <span className="who">{m.role === "user" ? "You" : "AskPod"}</span>
                     {m.role === "assistant" ? (
                       <IntentBadge intent={m.intent} blocked={m.blocked} />
                     ) : null}
                   </div>
-                  <div className="bubble-body">{m.content}</div>
+                  <div className="bubble-body">
+                    {m.role === "assistant" ? (
+                      <MarkdownMessage content={m.content} />
+                    ) : (
+                      m.content
+                    )}
+                  </div>
                   {m.role === "assistant" && (m.documents?.length ?? 0) > 0 ? (
                     <button
                       type="button"
@@ -254,7 +261,7 @@ export default function ChatApp() {
               {pending ? (
                 <div className="bubble assistant pending">
                   <div className="bubble-meta">
-                    <span className="who">Hearth</span>
+                    <span className="who">AskPod</span>
                   </div>
                   <div className="typing">
                     <span />
@@ -280,13 +287,13 @@ export default function ChatApp() {
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder="Ask something cozy… Shift+Enter for a new line"
+              placeholder="Ask AskPod anything… Shift+Enter for a new line"
               rows={2}
               disabled={pending}
               aria-label="Message"
             />
             <div className="composer-row">
-              <span className="thread-hint">Thread {threadId.slice(0, 8)}…</span>
+              <span className="thread-hint">Session {sessionId.slice(0, 8)}…</span>
               <button type="submit" className="send-btn" disabled={pending || !draft.trim()}>
                 {pending ? "Thinking…" : "Send"}
               </button>

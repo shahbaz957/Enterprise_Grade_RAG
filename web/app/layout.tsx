@@ -15,8 +15,8 @@ const sourceSans = Source_Sans_3({
 });
 
 export const metadata: Metadata = {
-  title: "Hearth · Enterprise RAG",
-  description: "Cozy chat over your enterprise knowledge base.",
+  title: "AskPod",
+  description: "Kubernetes and enterprise knowledge, answered instantly.",
 };
 
 export default function RootLayout({

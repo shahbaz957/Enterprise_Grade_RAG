@@ -11,10 +11,20 @@ from app.security.rate_limit import RateLimited
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    import asyncio
+
     if settings.has_database:
         from app.db.session_store import ensure_schema
 
         ensure_schema()
+
+    if settings.warmup_on_startup:
+        from app.warmup import warmup_runtime
+
+        _app.state.warmup = await asyncio.to_thread(warmup_runtime)
+    else:
+        _app.state.warmup = {"skipped": True}
+
     yield
 
 
@@ -95,6 +105,7 @@ async def ready() -> dict[str, object]:
         "database": settings.has_database,
         "langfuse": settings.has_langfuse,
         "guardrails": settings.has_guardrails,
+        "warmup_on_startup": settings.warmup_on_startup,
         "portkey": gateway_status(),
         "auth_required": settings.auth_required,
         "upstash_rate_limit": settings.has_upstash,
