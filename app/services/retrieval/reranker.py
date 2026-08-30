@@ -13,6 +13,15 @@ from app.ingestion.loaders.base import ensure_logfire
 
 JINA_RERANK_URL = "https://api.jina.ai/v1/rerank"
 
+_http_client: httpx.Client | None = None
+
+
+def _get_http_client() -> httpx.Client:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.Client(timeout=60.0)
+    return _http_client
+
 
 @dataclass(slots=True)
 class RerankHit:
@@ -74,10 +83,9 @@ def rerank(
         top_n=limit,
     ):
         try:
-            with httpx.Client(timeout=60.0) as client:
-                response = client.post(JINA_RERANK_URL, headers=headers, json=payload)
-                response.raise_for_status()
-                body = response.json()
+            response = _get_http_client().post(JINA_RERANK_URL, headers=headers, json=payload)
+            response.raise_for_status()
+            body = response.json()
         except httpx.HTTPError as exc:
             logfire.error("Jina rerank request failed", error=str(exc))
             raise RerankError(f"Jina rerank failed: {exc}") from exc
@@ -111,16 +119,3 @@ def rerank(
             top_score=hits[0].score if hits else None,
         )
         return hits
-
-
-def rerank_hits(
-    query: str,
-    candidates: Sequence[dict[str, Any]],
-    *,
-    text_key: str = "text",
-    top_n: int | None = None,
-) -> list[RerankHit]:
-    """Convenience: candidates are dicts with at least a text field + metadata."""
-    documents = [str(c.get(text_key, "")) for c in candidates]
-    metas = [dict(c) for c in candidates]
-    return rerank(query, documents, top_n=top_n, metadata=metas)

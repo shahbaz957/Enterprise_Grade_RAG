@@ -102,12 +102,13 @@ def retriever_node(state: AgentState) -> dict[str, Any]:
                 rerank_results=True,
             )
             documents = _hits_to_documents(hits)
+            top_score = documents[0].get("score") if documents else None
             logfire.info(
                 "Retriever complete",
                 query=query[:200],
                 candidates=RETRIEVE_CANDIDATES,
                 kept=len(documents),
-                top_score=documents[0].score if documents else None,
+                top_score=top_score,
             )
             return {
                 "documents": documents,

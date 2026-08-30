@@ -7,83 +7,34 @@ Uses chat history so follow-ups resolve correctly, e.g.:
     User: "how do I monitor it?"
     → rewritten_query ≈ "how to monitor Kubernetes DaemonSet"
 
-Contract (XOR) is enforced by ``PlannerDecision`` / ``PlanState``.
+Contract (XOR) is enforced by ``PlanState``.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Literal, Sequence
+from typing import Any, Sequence
 
 import logfire
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import ValidationError
 
-from app.agents.llm import get_chat_model
+from app.agents.dialogue import (
+    build_dialogue,
+    format_history_block,
+    is_human,
+    message_text,
+)
+from app.agents.llm import (
+    get_chat_model,
+    is_portkey_config_error,
+    with_portkey_fallback,
+)
 from app.agents.state import AgentIntent, AgentState, PlanState
 from app.config import settings
 from app.ingestion.loaders.base import ensure_logfire
 from app.observability.langfuse_tracing import get_langfuse_handler
-
-PlannerIntent = Literal["conversational", "technical"]
-
-_MAX_HISTORY_MESSAGES = 12  # recent turns only — keeps latency/cost down
-
-
-class PlannerDecision(BaseModel):
-    """Strict planner output schema (LLM must match this)."""
-
-    intent: PlannerIntent = Field(
-        description="conversational = reply only; technical = search rewrite only"
-    )
-    conversational_reply: str | None = Field(
-        default=None,
-        description="Required when intent=conversational. Direct reply to the user.",
-    )
-    rewritten_query: str | None = Field(
-        default=None,
-        description="Required when intent=technical. Standalone search query.",
-    )
-    rationale: str | None = Field(
-        default=None,
-        description="Optional short reason for logging (not shown to user).",
-    )
-
-    @model_validator(mode="after")
-    def enforce_exclusive_contract(self) -> PlannerDecision:
-        reply = (self.conversational_reply or "").strip() or None
-        query = (self.rewritten_query or "").strip() or None
-        self.conversational_reply = reply
-        self.rewritten_query = query
-
-        has_reply = reply is not None
-        has_query = query is not None
-
-        if has_reply == has_query:
-            raise ValueError(
-                "PlannerDecision XOR violated: set exactly one of "
-                f"conversational_reply / rewritten_query "
-                f"(got reply={has_reply}, query={has_query})"
-            )
-
-        expected: PlannerIntent = "conversational" if has_reply else "technical"
-        if self.intent != expected:
-            raise ValueError(
-                f"PlannerDecision intent={self.intent!r} disagrees with filled "
-                f"field (expected {expected!r}). Mixed/ambiguous outputs must be "
-                "resolved to a single path before continuing."
-            )
-        return self
-
-    def to_plan_state(self) -> PlanState:
-        return PlanState(
-            intent=self.intent,
-            conversational_reply=self.conversational_reply,
-            rewritten_query=self.rewritten_query,
-            rationale=self.rationale,
-        )
-
 
 PLANNER_SYSTEM_PROMPT = """You are the planner for an enterprise RAG assistant.
 
@@ -130,17 +81,16 @@ Output raw JSON only — no markdown fences.
 """
 
 
-def parse_planner_decision(data: dict[str, Any] | PlannerDecision) -> PlannerDecision:
+def parse_planner_decision(data: dict[str, Any] | PlanState) -> PlanState:
     """Validate raw model JSON against the planner contract."""
-    if isinstance(data, PlannerDecision):
+    if isinstance(data, PlanState):
         return data
-    return PlannerDecision.model_validate(data)
+    return PlanState.model_validate(data)
 
 
-def apply_planner_decision(state: AgentState, decision: PlannerDecision) -> dict[str, Any]:
-    """Map a validated decision onto AgentState updates."""
-    plan = decision.to_plan_state()
-    intent: AgentIntent = decision.intent
+def apply_planner_decision(state: AgentState, plan: PlanState) -> dict[str, Any]:
+    """Map a validated plan onto AgentState updates."""
+    intent: AgentIntent = plan.intent
 
     updates: dict[str, Any] = {
         "plan": plan.model_dump(),
@@ -149,87 +99,17 @@ def apply_planner_decision(state: AgentState, decision: PlannerDecision) -> dict
         "error": None,
     }
 
-    if decision.intent == "conversational":
-        updates["final_answer"] = decision.conversational_reply or ""
+    if plan.intent == "conversational":
+        updates["final_answer"] = plan.conversational_reply or ""
         updates["documents"] = []
         updates["status"] = "done"
         updates["messages"] = [AIMessage(content=updates["final_answer"])]
     else:
-        updates["current_query"] = decision.rewritten_query or state.get(
-            "current_query", ""
-        )
+        updates["current_query"] = plan.rewritten_query or state.get("current_query", "")
         updates["final_answer"] = ""
         updates["status"] = "retrieving"
 
     return updates
-
-
-def _message_text(message: Any) -> str:
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
-                parts.append(str(block.get("text", "")))
-        return "\n".join(p for p in parts if p).strip()
-    return str(content or "").strip()
-
-
-def _is_human(message: Any) -> bool:
-    role = getattr(message, "type", None) or getattr(message, "role", None)
-    return role in {"human", "user"} or isinstance(message, HumanMessage)
-
-
-def _is_ai(message: Any) -> bool:
-    role = getattr(message, "type", None) or getattr(message, "role", None)
-    return role in {"ai", "assistant"} or isinstance(message, AIMessage)
-
-
-def build_dialogue(state: AgentState) -> list[BaseMessage]:
-    """Prior turns + latest user query (history-aware input for the LLM)."""
-    history: list[BaseMessage] = []
-    for msg in state.get("messages") or []:
-        if isinstance(msg, BaseMessage):
-            history.append(msg)
-        elif isinstance(msg, dict):
-            role = msg.get("role") or msg.get("type")
-            text = str(msg.get("content") or "").strip()
-            if not text:
-                continue
-            if role in {"human", "user"}:
-                history.append(HumanMessage(content=text))
-            elif role in {"ai", "assistant"}:
-                history.append(AIMessage(content=text))
-
-    # Keep a short window of recent turns.
-    if len(history) > _MAX_HISTORY_MESSAGES:
-        history = history[-_MAX_HISTORY_MESSAGES:]
-
-    query = (state.get("current_query") or "").strip()
-    if query:
-        if not history or not _is_human(history[-1]) or _message_text(history[-1]) != query:
-            history = [*history, HumanMessage(content=query)]
-    return history
-
-
-def _format_history_block(dialogue: Sequence[BaseMessage]) -> str:
-    """Readable transcript for the planner (explicit roles)."""
-    lines: list[str] = []
-    for msg in dialogue:
-        text = _message_text(msg)
-        if not text:
-            continue
-        if _is_human(msg):
-            lines.append(f"User: {text}")
-        elif _is_ai(msg):
-            lines.append(f"Assistant: {text}")
-        else:
-            lines.append(f"Other: {text}")
-    return "\n".join(lines) if lines else "(no prior turns)"
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:
@@ -252,15 +132,33 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
     return data
 
 
-def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlannerDecision:
-    """Call the chat model with history + enforce XOR via PlannerDecision."""
-    llm = get_chat_model(
-        temperature=0.1,
-        route="agent.planner",
-        feature="planner",
-    )
-    transcript = _format_history_block(dialogue)
-    latest = _message_text(dialogue[-1]) if dialogue else ""
+def _llm_plan_with_model(
+    llm: Any,
+    prompt: list[BaseMessage],
+    call_config: dict[str, Any],
+) -> PlanState:
+    """Run planner against one chat model (structured, then JSON fallback)."""
+    try:
+        structured = llm.with_structured_output(PlanState)
+        result = structured.invoke(prompt, config=call_config)
+        if isinstance(result, PlanState):
+            return result
+        if isinstance(result, dict):
+            return parse_planner_decision(result)
+    except Exception as exc:  # noqa: BLE001 — fall through to JSON parse path
+        if is_portkey_config_error(exc):
+            raise
+        logfire.warn("structured_output unavailable; using JSON prompt", error=str(exc))
+
+    raw = llm.invoke(prompt, config=call_config)
+    content = message_text(raw)
+    return parse_planner_decision(_extract_json_object(content))
+
+
+def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlanState:
+    """Call the chat model with history + enforce XOR via PlanState."""
+    transcript = format_history_block(dialogue)
+    latest = message_text(dialogue[-1]) if dialogue else ""
 
     user_payload = (
         f"Conversation so far:\n{transcript}\n\n"
@@ -277,20 +175,12 @@ def _llm_plan(dialogue: Sequence[BaseMessage]) -> PlannerDecision:
     if handler is not None:
         call_config["callbacks"] = [handler]
 
-    # Prefer native structured output when the provider supports it.
-    try:
-        structured = llm.with_structured_output(PlannerDecision)
-        result = structured.invoke(prompt, config=call_config)
-        if isinstance(result, PlannerDecision):
-            return result
-        if isinstance(result, dict):
-            return parse_planner_decision(result)
-    except Exception as exc:  # noqa: BLE001 — fall through to JSON parse path
-        logfire.warn("structured_output unavailable; using JSON prompt", error=str(exc))
-
-    raw = llm.invoke(prompt, config=call_config)
-    content = _message_text(raw)
-    return parse_planner_decision(_extract_json_object(content))
+    return with_portkey_fallback(
+        lambda llm: _llm_plan_with_model(llm, prompt, call_config),
+        temperature=0.1,
+        route="agent.planner",
+        feature="planner",
+    )
 
 
 def planner_node(state: AgentState) -> dict[str, Any]:
@@ -299,7 +189,7 @@ def planner_node(state: AgentState) -> dict[str, Any]:
     dialogue = build_dialogue(state)
     query = (state.get("current_query") or "").strip()
     if not query and dialogue:
-        query = _message_text(dialogue[-1])
+        query = message_text(dialogue[-1])
 
     with logfire.span(
         "agent.planner",
@@ -308,7 +198,7 @@ def planner_node(state: AgentState) -> dict[str, Any]:
     ):
         try:
             if not query:
-                decision = PlannerDecision(
+                plan = PlanState(
                     intent="conversational",
                     conversational_reply=(
                         "Hi — ask me a technical question about your enterprise "
@@ -316,18 +206,18 @@ def planner_node(state: AgentState) -> dict[str, Any]:
                     ),
                     rationale="empty query",
                 )
-            elif settings.has_groq or settings.has_openai:
-                decision = _llm_plan(dialogue)
+            elif settings.has_portkey or settings.has_groq or settings.has_openai:
+                plan = _llm_plan(dialogue)
             else:
                 logfire.warn("No LLM keys — using rule stub planner")
-                decision = _stub_plan(query, dialogue)
+                plan = _stub_plan(query, dialogue)
 
-            updates = apply_planner_decision(state, decision)
+            updates = apply_planner_decision(state, plan)
             logfire.info(
                 "Planner decision",
-                intent=decision.intent,
-                rewritten_query=decision.rewritten_query,
-                has_reply=bool(decision.conversational_reply),
+                intent=plan.intent,
+                rewritten_query=plan.rewritten_query,
+                has_reply=bool(plan.conversational_reply),
                 history_turns=len(dialogue),
             )
             return updates
@@ -390,11 +280,11 @@ def _is_pure_greeting(lowered: str) -> bool:
     return False
 
 
-def _stub_plan(query: str, dialogue: Sequence[BaseMessage] = ()) -> PlannerDecision:
+def _stub_plan(query: str, dialogue: Sequence[BaseMessage] = ()) -> PlanState:
     """Offline fallback when no LLM keys are configured."""
     lowered = query.lower().strip()
     if not lowered:
-        return PlannerDecision(
+        return PlanState(
             intent="conversational",
             conversational_reply=(
                 "Hi — ask me a technical question about your enterprise docs "
@@ -404,7 +294,7 @@ def _stub_plan(query: str, dialogue: Sequence[BaseMessage] = ()) -> PlannerDecis
         )
 
     if _is_pure_greeting(lowered):
-        return PlannerDecision(
+        return PlanState(
             intent="conversational",
             conversational_reply=(
                 "Hello! I can search your enterprise knowledge base for "
@@ -413,24 +303,23 @@ def _stub_plan(query: str, dialogue: Sequence[BaseMessage] = ()) -> PlannerDecis
             rationale="greeting / meta",
         )
 
-    # Cheap history hint for follow-ups when LLM is unavailable.
     prior_topics: list[str] = []
     for msg in dialogue:
-        text = _message_text(msg)
-        if _is_human(msg) and text and text.lower() != lowered:
+        text = message_text(msg)
+        if is_human(msg) and text and text.lower() != lowered:
             prior_topics.append(text)
 
     if prior_topics and any(
         token in lowered for token in ("it", "that", "this", "them", "those")
     ):
         rewritten = f"{query} (context: {prior_topics[-1]})"
-        return PlannerDecision(
+        return PlanState(
             intent="technical",
             rewritten_query=rewritten,
             rationale="stub: pronoun follow-up with prior user turn",
         )
 
-    return PlannerDecision(
+    return PlanState(
         intent="technical",
         rewritten_query=query,
         rationale="stub: pass-through",

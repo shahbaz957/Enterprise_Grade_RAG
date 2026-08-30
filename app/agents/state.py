@@ -58,10 +58,22 @@ class PlanState(BaseModel):
     field is present so routing cannot disagree with the payload.
     """
 
-    intent: AgentIntent = "unknown"
-    conversational_reply: str | None = None
-    rewritten_query: str | None = None
-    rationale: str | None = None
+    intent: AgentIntent = Field(
+        default="unknown",
+        description="conversational = reply only; technical = search rewrite only",
+    )
+    conversational_reply: str | None = Field(
+        default=None,
+        description="Required when intent=conversational. Direct reply to the user.",
+    )
+    rewritten_query: str | None = Field(
+        default=None,
+        description="Required when intent=technical. Standalone search query.",
+    )
+    rationale: str | None = Field(
+        default=None,
+        description="Optional short reason for logging (not shown to user).",
+    )
 
     @model_validator(mode="after")
     def enforce_xor(self) -> PlanState:
@@ -81,13 +93,18 @@ class PlanState(BaseModel):
             )
 
         expected: AgentIntent = "conversational" if has_reply else "technical"
-        if self.intent not in (expected, "unknown"):
+        if self.intent == "unknown":
+            self.intent = expected
+        elif self.intent != expected:
             raise ValueError(
                 f"PlanState intent={self.intent!r} disagrees with filled field "
                 f"(expected {expected!r})"
             )
-        self.intent = expected
         return self
+
+
+# Backward-compatible alias (tests / exports).
+PlannerDecision = PlanState
 
 
 class AgentState(TypedDict):

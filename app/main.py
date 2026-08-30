@@ -5,14 +5,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.config import settings
+from app.security.auth import AuthPrincipal
+from app.security.rate_limit import RateLimited
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    import asyncio
+
     if settings.has_database:
         from app.db.session_store import ensure_schema
 
         ensure_schema()
+
+    if settings.warmup_on_startup:
+        from app.warmup import warmup_runtime
+
+        _app.state.warmup = await asyncio.to_thread(warmup_runtime)
+    else:
+        _app.state.warmup = {"skipped": True}
+
     yield
 
 
@@ -49,6 +61,7 @@ class QueryResponse(BaseModel):
     thread_id: str
     intent: str
     status: str
+    blocked: bool = False
     documents: list[dict] = Field(default_factory=list)
     messages: list[dict] = Field(default_factory=list)
     error: str | None = None
@@ -61,6 +74,21 @@ class SessionResponse(BaseModel):
 class MessagesResponse(BaseModel):
     session_id: str
     messages: list[dict]
+
+
+@app.get("/")
+async def root() -> dict[str, object]:
+    return {
+        "service": settings.app_name,
+        "version": settings.app_version,
+        "docs": "/docs",
+        "health": "/health",
+        "ready": "/ready",
+        "graph": "/graph",
+        "query": "POST /query",
+        "auth_required": settings.auth_required,
+        "rate_limit_per_minute": settings.rate_limit_per_minute,
+    }
 
 
 @app.get("/health")
@@ -77,7 +105,10 @@ async def ready() -> dict[str, object]:
         "database": settings.has_database,
         "langfuse": settings.has_langfuse,
         "guardrails": settings.has_guardrails,
+        "warmup_on_startup": settings.warmup_on_startup,
         "portkey": gateway_status(),
+        "auth_required": settings.auth_required,
+        "upstash_rate_limit": settings.has_upstash,
     }
 
 
@@ -107,7 +138,9 @@ async def graph_info() -> dict[str, object]:
 
 
 @app.post("/sessions", response_model=SessionResponse)
-async def create_chat_session() -> SessionResponse:
+async def create_chat_session(
+    _principal: AuthPrincipal,
+) -> SessionResponse:
     """Call when the RAG UI first loads — store returned id in the browser."""
     if not settings.has_database:
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured")
@@ -117,7 +150,11 @@ async def create_chat_session() -> SessionResponse:
 
 
 @app.get("/sessions/{session_id}/messages", response_model=MessagesResponse)
-async def get_session_messages(session_id: str, limit: int = 100) -> MessagesResponse:
+async def get_session_messages(
+    session_id: str,
+    _principal: AuthPrincipal,
+    limit: int = 100,
+) -> MessagesResponse:
     """Reload transcript for the UI when the user returns."""
     if not settings.has_database:
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured")
@@ -128,10 +165,19 @@ async def get_session_messages(session_id: str, limit: int = 100) -> MessagesRes
 
 
 @app.post("/query", response_model=QueryResponse)
-async def query(payload: QueryRequest) -> QueryResponse:
+async def query(
+    payload: QueryRequest,
+    _principal: AuthPrincipal,
+    _: RateLimited,
+) -> QueryResponse:
+    import asyncio
+
     from app.agents.graph import invoke_agent
 
-    result = invoke_agent(
+    # Run sync agent (+ NeMo) in a worker thread so FastAPI's event loop stays free
+    # and NeMo is not forced into "sync generate inside async" conflicts.
+    result = await asyncio.to_thread(
+        invoke_agent,
         payload.question,
         session_id=payload.session_id or payload.thread_id,
     )
@@ -142,12 +188,14 @@ async def query(payload: QueryRequest) -> QueryResponse:
         elif isinstance(d, dict):
             docs.append(d)
     sid = str(result.get("session_id") or "")
+    status = str(result.get("status") or "unknown")
     return QueryResponse(
         answer=result.get("final_answer") or "",
         session_id=sid,
         thread_id=sid,
         intent=str(result.get("intent") or "unknown"),
-        status=str(result.get("status") or "unknown"),
+        status=status,
+        blocked=status in {"blocked", "guardrailed"},
         documents=docs,
         messages=list(result.get("messages") or []),
         error=result.get("error"),

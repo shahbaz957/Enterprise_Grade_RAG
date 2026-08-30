@@ -18,17 +18,30 @@ class Settings(BaseSettings):
     )
 
     # --- App ---
-    app_name: str = "Enterprise RAG Backend"
+    app_name: str = "AskPod"
     app_version: str = "0.1.0"
     debug: bool = False
-    api_prefix: str = "/api/v1"
     backend_url: str = "http://localhost:8000"
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:3000",
             "http://127.0.0.1:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3001",
         ]
     )
+
+    # --- Auth (prod): Bearer RAG_API_KEY or HS256 JWT ---
+    rag_api_key: str = ""
+    rag_jwt_secret: str = ""
+    # When true, always require auth. Otherwise: require when DEBUG=false and RAG_API_KEY set.
+    rag_auth_required: bool = False
+
+    # --- Rate limit (Upstash Redis REST in cloud; in-memory locally) ---
+    upstash_redis_rest_url: str = ""
+    upstash_redis_rest_token: str = ""
+    rate_limit_per_minute: int = 60
+    rate_limit_window_seconds: int = 60
 
     # --- OpenAI (embeddings + optional chat) ---
     openai_api_key: str = ""
@@ -46,10 +59,12 @@ class Settings(BaseSettings):
     portkey_api_key: str = ""
     # Legacy single VK; prefer primary/fallback below.
     portkey_virtual_key: str = ""
-    portkey_virtual_key_primary: str = ""  # Groq (or primary) virtual key slug
-    portkey_virtual_key_fallback: str = ""  # OpenAI (or secondary) virtual key slug
-    # Optional dashboard Config ID — if set, overrides inline JSON config.
+    portkey_virtual_key_primary: str = ""  # OpenAI virtual key slug (primary)
+    portkey_virtual_key_fallback: str = ""  # Groq virtual key slug (fallback)
+    # Saved Config ID (pc-...). Required for fallback/cache when org blocks inline config.
     portkey_config_id: str = ""
+    # Most orgs block inline JSON in x-portkey-config — keep False unless Portkey allows it.
+    portkey_allow_inline_config: bool = False
     portkey_strategy: str = "fallback"  # fallback | loadbalance
     portkey_primary_weight: float = 0.7
     portkey_fallback_weight: float = 0.3
@@ -59,6 +74,10 @@ class Settings(BaseSettings):
     portkey_timeout_ms: int = 30_000
     portkey_environment: str = "dev"
     portkey_enabled: bool = True
+
+    # True = OpenAI for guardrails / judge / direct LLM. False = Groq (old default).
+    # Does not change Portkey routing — Portkey uses PRIMARY/FALLBACK virtual keys.
+    use_openai_llm: bool = True
 
     # --- Jina (reranker) ---
     jina_api_key: str = ""
@@ -85,9 +104,10 @@ class Settings(BaseSettings):
     guardrails_config_path: str = "app/guardrails/config"
     # If True, skip rails when NeMo init/check fails; default fail-closed.
     guardrails_fail_open: bool = False
+    # Pre-load guardrails + agent graph at startup (avoids multi-minute first /query).
+    warmup_on_startup: bool = True
 
     # --- Paths ---
-    data_dir: Path = ROOT_DIR / "DATA"
     true_data_dir: Path = ROOT_DIR / "DATA" / "true_data"
     noisy_data_dir: Path = ROOT_DIR / "DATA" / "noisy_data"
     processed_data_dir: Path = ROOT_DIR / "processed_data"
@@ -109,10 +129,6 @@ class Settings(BaseSettings):
     @property
     def active_groq_api_key(self) -> str:
         return self.groq_api_key or self.groq_fallback_api_key
-
-    @property
-    def has_qdrant(self) -> bool:
-        return bool(self.qdrant_endpoint)
 
     @property
     def has_portkey(self) -> bool:
@@ -157,6 +173,19 @@ class Settings(BaseSettings):
         if not path.is_absolute():
             path = ROOT_DIR / path
         return path.is_dir()
+
+    @property
+    def auth_required(self) -> bool:
+        """Protect /query and /sessions* in non-local setups."""
+        if self.rag_auth_required:
+            return True
+        if self.debug:
+            return False
+        return bool(self.rag_api_key)
+
+    @property
+    def has_upstash(self) -> bool:
+        return bool(self.upstash_redis_rest_url and self.upstash_redis_rest_token)
 
 
 @lru_cache
