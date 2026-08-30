@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     app_name: str = "Enterprise RAG Backend"
     app_version: str = "0.1.0"
     debug: bool = False
-    api_prefix: str = "/api/v1"
     backend_url: str = "http://localhost:8000"
     cors_origins: list[str] = Field(
         default_factory=lambda: [
@@ -107,7 +106,6 @@ class Settings(BaseSettings):
     guardrails_fail_open: bool = False
 
     # --- Paths ---
-    data_dir: Path = ROOT_DIR / "DATA"
     true_data_dir: Path = ROOT_DIR / "DATA" / "true_data"
     noisy_data_dir: Path = ROOT_DIR / "DATA" / "noisy_data"
     processed_data_dir: Path = ROOT_DIR / "processed_data"
@@ -129,10 +127,6 @@ class Settings(BaseSettings):
     @property
     def active_groq_api_key(self) -> str:
         return self.groq_api_key or self.groq_fallback_api_key
-
-    @property
-    def has_qdrant(self) -> bool:
-        return bool(self.qdrant_endpoint)
 
     @property
     def has_portkey(self) -> bool:

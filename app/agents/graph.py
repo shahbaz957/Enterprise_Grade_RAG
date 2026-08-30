@@ -43,8 +43,10 @@ def _route_after_planner(state: AgentState) -> RouteAfterPlanner:
     return "responder"
 
 
-def build_graph():
-    """Compile a stateless graph (no checkpointer)."""
+@lru_cache(maxsize=1)
+def get_compiled_graph():
+    ensure_logfire()
+    configure_langfuse()
     graph = StateGraph(AgentState)
     graph.add_node("planner", planner_node)
     graph.add_node("retriever", retriever_node)
@@ -62,13 +64,6 @@ def build_graph():
     graph.add_edge("retriever", "responder")
     graph.add_edge("responder", END)
     return graph.compile()
-
-
-@lru_cache(maxsize=1)
-def get_compiled_graph():
-    ensure_logfire()
-    configure_langfuse()
-    return build_graph()
 
 
 def _history_to_lc_messages(rows: list[dict[str, Any]]) -> list:

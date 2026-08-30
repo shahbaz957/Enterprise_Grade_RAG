@@ -1,4 +1,4 @@
-"""Responder node — dual prompts for conversational vs grounded technical answers."""
+"""Responder node — planner passthrough (conversational) or grounded technical answers."""
 
 from __future__ import annotations
 
@@ -7,18 +7,10 @@ from typing import Any, Sequence
 import logfire
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from app.agents.dialogue import build_dialogue, format_history_block, message_text
 from app.agents.llm import invoke_chat
-from app.agents.nodes.planner import _format_history_block, _message_text, build_dialogue
 from app.agents.state import AgentState
 from app.ingestion.loaders.base import ensure_logfire
-
-FRIENDLY_SYSTEM_PROMPT = """You are a warm, concise enterprise assistant with conversation memory.
-
-Reply naturally to the user. Use prior turns when helpful. Do not invent product
-docs or run a fake knowledge-base lookup. Keep answers short unless the user
-asks for detail. If they want technical depth from internal docs, invite them
-to ask a concrete question.
-"""
 
 ARCHITECT_SYSTEM_PROMPT = """You are a senior platform / systems architect answering from
 retrieved enterprise documentation.
@@ -53,43 +45,31 @@ def _format_context(documents: Sequence[Any]) -> str:
 def _latest_user_text(state: AgentState) -> str:
     dialogue = build_dialogue(state)
     for msg in reversed(dialogue):
-        text = _message_text(msg)
+        text = message_text(msg)
         if text and getattr(msg, "type", None) in {"human", "user"}:
             return text
     return (state.get("current_query") or "").strip()
 
 
-def _friendly_reply(state: AgentState) -> str:
-    """Conversational path — memory-aware, no retrieval required."""
+def _planner_conversational_reply(state: AgentState) -> str:
+    """Reply already produced by the planner on the conversational path."""
     plan = state.get("plan") or {}
-    draft = ""
     if isinstance(plan, dict):
-        draft = (plan.get("conversational_reply") or "").strip()
+        reply = (plan.get("conversational_reply") or "").strip()
     else:
-        draft = (getattr(plan, "conversational_reply", None) or "").strip()
+        reply = (getattr(plan, "conversational_reply", None) or "").strip()
+    if reply:
+        return reply
+    return (state.get("final_answer") or "").strip()
 
-    try:
-        transcript = _format_history_block(build_dialogue(state))
-        user_payload = (
-            f"Conversation so far:\n{transcript}\n\n"
-            f"Planner draft reply (optional to refine):\n{draft or '(none)'}\n\n"
-            "Write the final user-facing reply."
-        )
-        raw = invoke_chat(
-            [
-                SystemMessage(content=FRIENDLY_SYSTEM_PROMPT),
-                HumanMessage(content=user_payload),
-            ],
-            temperature=0.4,
-            run_name="agent.responder.friendly",
-            route="agent.responder",
-            feature="responder_friendly",
-        )
-    except RuntimeError:
-        return draft or state.get("final_answer") or "Hello — how can I help?"
 
-    text = _message_text(raw).strip()
-    return text or draft or "Hello — how can I help?"
+def _conversational_answer(state: AgentState) -> str:
+    """Return planner reply directly — avoids a second LLM call."""
+    reply = _planner_conversational_reply(state)
+    if reply:
+        logfire.info("Using planner conversational reply (skipped responder LLM)")
+        return reply
+    return "Hello — how can I help?"
 
 
 def _architect_reply(state: AgentState) -> str:
@@ -99,7 +79,7 @@ def _architect_reply(state: AgentState) -> str:
     search_q = (state.get("current_query") or question).strip()
     context = _format_context(docs)
 
-    transcript = _format_history_block(build_dialogue(state))
+    transcript = format_history_block(build_dialogue(state))
     user_payload = (
         f"Conversation so far:\n{transcript}\n\n"
         f"User question:\n{question}\n\n"
@@ -129,7 +109,7 @@ def _architect_reply(state: AgentState) -> str:
             )
         return "Retrieved context (LLM unavailable):\n" + "\n".join(bits)
 
-    return _message_text(raw).strip() or "I could not produce an answer from the retrieved context."
+    return message_text(raw).strip() or "I could not produce an answer from the retrieved context."
 
 
 def responder_node(state: AgentState) -> dict[str, Any]:
@@ -147,7 +127,7 @@ def responder_node(state: AgentState) -> dict[str, Any]:
             elif intent == "technical":
                 answer = _architect_reply(state)
             else:
-                answer = _friendly_reply(state)
+                answer = _conversational_answer(state)
 
             logfire.info(
                 "Responder complete",

@@ -99,7 +99,6 @@ def build_metadata(
 ) -> dict[str, Any]:
     """Attach request metadata for Portkey logs / cost dashboards."""
     meta: dict[str, Any] = {
-        "_environment": settings.portkey_environment or ("dev" if settings.debug else "prod"),
         "environment": settings.portkey_environment or ("dev" if settings.debug else "prod"),
         "app": settings.app_name,
         "version": settings.app_version,
@@ -107,7 +106,6 @@ def build_metadata(
         "route": route or "llm",
     }
     if user_id:
-        meta["user"] = user_id
         meta["user_id"] = user_id
     if extra:
         meta.update({k: v for k, v in extra.items() if v is not None})

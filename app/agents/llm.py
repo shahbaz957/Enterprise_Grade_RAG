@@ -5,12 +5,15 @@ Prefer Portkey when configured. Otherwise use USE_OPENAI_LLM (OpenAI vs Groq).
 
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence
+from collections.abc import Callable
+from typing import Any, Optional, Sequence, TypeVar
 
 import logfire
 
 from app.config import settings
 from app.observability.langfuse_tracing import get_langfuse_handler
+
+T = TypeVar("T")
 
 
 def is_portkey_config_error(exc: BaseException) -> bool:
@@ -74,6 +77,40 @@ def get_chat_model(
     return get_direct_chat_model(temperature=temperature)
 
 
+def with_portkey_fallback(
+    invoke_fn: Callable[[Any], T],
+    *,
+    temperature: float = 0.2,
+    user_id: str | None = None,
+    route: str | None = None,
+    feature: str | None = None,
+    extra_metadata: Optional[dict[str, Any]] = None,
+) -> T:
+    """Run ``invoke_fn(llm)`` via Portkey; retry with direct LLM on config errors."""
+    llm = get_chat_model(
+        temperature=temperature,
+        user_id=user_id,
+        route=route,
+        feature=feature,
+        extra_metadata=extra_metadata,
+    )
+    try:
+        return invoke_fn(llm)
+    except Exception as exc:
+        if (
+            settings.has_portkey
+            and is_portkey_config_error(exc)
+            and (settings.has_groq or settings.has_openai)
+        ):
+            logfire.warn(
+                "Portkey blocked inline config; falling back to direct LLM. "
+                "Set PORTKEY_CONFIG_ID=pc-...",
+                error=str(exc)[:240],
+            )
+            return invoke_fn(get_direct_chat_model(temperature=temperature))
+        raise
+
+
 def invoke_chat(
     messages: Sequence[Any],
     *,
@@ -85,13 +122,6 @@ def invoke_chat(
     extra_metadata: Optional[dict[str, Any]] = None,
 ) -> Any:
     """Invoke the chat model; on Portkey inline_config_blocked, retry direct LLM."""
-    llm = get_chat_model(
-        temperature=temperature,
-        user_id=user_id,
-        route=route or run_name or "llm",
-        feature=feature or "agent_chat",
-        extra_metadata=extra_metadata,
-    )
     config: dict[str, Any] = {}
     handler = get_langfuse_handler()
     if handler is not None:
@@ -99,19 +129,16 @@ def invoke_chat(
     if run_name:
         config["run_name"] = run_name
 
-    try:
+    def _invoke(llm: Any) -> Any:
         if config:
             return llm.invoke(messages, config=config)
         return llm.invoke(messages)
-    except Exception as exc:
-        if settings.has_portkey and is_portkey_config_error(exc):
-            logfire.warn(
-                "Portkey blocked inline config; falling back to direct LLM. "
-                "Set PORTKEY_CONFIG_ID=pc-...",
-                error=str(exc)[:240],
-            )
-            direct = get_direct_chat_model(temperature=temperature)
-            if config:
-                return direct.invoke(messages, config=config)
-            return direct.invoke(messages)
-        raise
+
+    return with_portkey_fallback(
+        _invoke,
+        temperature=temperature,
+        user_id=user_id,
+        route=route or run_name or "llm",
+        feature=feature or "agent_chat",
+        extra_metadata=extra_metadata,
+    )
